@@ -16,13 +16,13 @@ package v1
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,10 +40,8 @@ type apiTest struct {
 	inRes        interface{}
 
 	reqPath   string
-	reqParam  url.Values
 	reqMethod string
 	res       interface{}
-	warnings  Warnings
 	err       error
 }
 
@@ -55,7 +53,7 @@ type apiTestClient struct {
 func (c *apiTestClient) URL(ep string, args map[string]string) *url.URL {
 	path := ep
 	for k, v := range args {
-		path = strings.Replace(path, ":"+k, v, -1)
+		path = strings.ReplaceAll(path, ":"+k, v)
 	}
 	u := &url.URL{
 		Host: "test:9090",
@@ -64,8 +62,7 @@ func (c *apiTestClient) URL(ep string, args map[string]string) *url.URL {
 	return u
 }
 
-func (c *apiTestClient) Do(ctx context.Context, req *http.Request) (*http.Response, []byte, Warnings, error) {
-
+func (c *apiTestClient) Do(_ context.Context, req *http.Request) (*http.Response, []byte, Warnings, error) {
 	test := c.curTest
 
 	if req.URL.Path != test.reqPath {
@@ -101,7 +98,6 @@ func (c *apiTestClient) DoGetFallback(ctx context.Context, u *url.URL, args url.
 }
 
 func TestAPIs(t *testing.T) {
-
 	testTime := time.Now()
 
 	tc := &apiTestClient{
@@ -131,7 +127,7 @@ func TestAPIs(t *testing.T) {
 		}
 	}
 
-	doDeleteSeries := func(matcher string, startTime time.Time, endTime time.Time) func() (interface{}, Warnings, error) {
+	doDeleteSeries := func(matcher string, startTime, endTime time.Time) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
 			return nil, nil, promAPI.DeleteSeries(context.Background(), []string{matcher}, startTime, endTime)
 		}
@@ -158,15 +154,15 @@ func TestAPIs(t *testing.T) {
 		}
 	}
 
-	doLabelNames := func(matches []string) func() (interface{}, Warnings, error) {
+	doLabelNames := func(matches []string, startTime, endTime time.Time, opts ...Option) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
-			return promAPI.LabelNames(context.Background(), matches, time.Now().Add(-100*time.Hour), time.Now())
+			return promAPI.LabelNames(context.Background(), matches, startTime, endTime, opts...)
 		}
 	}
 
-	doLabelValues := func(matches []string, label string) func() (interface{}, Warnings, error) {
+	doLabelValues := func(matches []string, label string, startTime, endTime time.Time, opts ...Option) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
-			return promAPI.LabelValues(context.Background(), label, matches, time.Now().Add(-100*time.Hour), time.Now())
+			return promAPI.LabelValues(context.Background(), label, matches, startTime, endTime, opts...)
 		}
 	}
 
@@ -182,9 +178,9 @@ func TestAPIs(t *testing.T) {
 		}
 	}
 
-	doSeries := func(matcher string, startTime time.Time, endTime time.Time) func() (interface{}, Warnings, error) {
+	doSeries := func(matcher string, startTime, endTime time.Time, opts ...Option) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
-			return promAPI.Series(context.Background(), []string{matcher}, startTime, endTime)
+			return promAPI.Series(context.Background(), []string{matcher}, startTime, endTime, opts...)
 		}
 	}
 
@@ -209,23 +205,23 @@ func TestAPIs(t *testing.T) {
 		}
 	}
 
-	doTargetsMetadata := func(matchTarget string, metric string, limit string) func() (interface{}, Warnings, error) {
+	doTargetsMetadata := func(matchTarget, metric, limit string) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
 			v, err := promAPI.TargetsMetadata(context.Background(), matchTarget, metric, limit)
 			return v, nil, err
 		}
 	}
 
-	doMetadata := func(metric string, limit string) func() (interface{}, Warnings, error) {
+	doMetadata := func(metric, limit string) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
 			v, err := promAPI.Metadata(context.Background(), metric, limit)
 			return v, nil, err
 		}
 	}
 
-	doTSDB := func() func() (interface{}, Warnings, error) {
+	doTSDB := func(opts ...Option) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
-			v, err := promAPI.TSDB(context.Background())
+			v, err := promAPI.TSDB(context.Background(), opts...)
 			return v, nil, err
 		}
 	}
@@ -237,7 +233,7 @@ func TestAPIs(t *testing.T) {
 		}
 	}
 
-	doQueryExemplars := func(query string, startTime time.Time, endTime time.Time) func() (interface{}, Warnings, error) {
+	doQueryExemplars := func(query string, startTime, endTime time.Time) func() (interface{}, Warnings, error) {
 		return func() (interface{}, Warnings, error) {
 			v, err := promAPI.QueryExemplars(context.Background(), query, startTime, endTime)
 			return v, nil, err
@@ -257,11 +253,6 @@ func TestAPIs(t *testing.T) {
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query":   []string{"2"},
-				"time":    []string{testTime.Format(time.RFC3339Nano)},
-				"timeout": []string{(5 * time.Second).String()},
-			},
 			res: &model.Scalar{
 				Value:     2,
 				Timestamp: model.TimeFromUnix(testTime.Unix()),
@@ -269,15 +260,11 @@ func TestAPIs(t *testing.T) {
 		},
 		{
 			do:    doQuery("2", testTime),
-			inErr: fmt.Errorf("some error"),
+			inErr: errors.New("some error"),
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query": []string{"2"},
-				"time":  []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 		{
 			do:           doQuery("2", testTime),
@@ -291,11 +278,7 @@ func TestAPIs(t *testing.T) {
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query": []string{"2"},
-				"time":  []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err: errors.New("server_error: server error: 500"),
+			err:       errors.New("server_error: server error: 500"),
 		},
 		{
 			do:           doQuery("2", testTime),
@@ -309,11 +292,7 @@ func TestAPIs(t *testing.T) {
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query": []string{"2"},
-				"time":  []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err: errors.New("client_error: client error: 404"),
+			err:       errors.New("client_error: client error: 404"),
 		},
 		// Warning only.
 		{
@@ -329,15 +308,10 @@ func TestAPIs(t *testing.T) {
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query": []string{"2"},
-				"time":  []string{testTime.Format(time.RFC3339Nano)},
-			},
 			res: &model.Scalar{
 				Value:     2,
 				Timestamp: model.TimeFromUnix(testTime.Unix()),
 			},
-			warnings: []string{"warning"},
 		},
 		// Warning + error.
 		{
@@ -353,115 +327,97 @@ func TestAPIs(t *testing.T) {
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query",
-			reqParam: url.Values{
-				"query": []string{"2"},
-				"time":  []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err:      errors.New("client_error: client error: 404"),
-			warnings: []string{"warning"},
+			err:       errors.New("client_error: client error: 404"),
 		},
 
 		{
 			do: doQueryRange("2", Range{
 				Start: testTime.Add(-time.Minute),
 				End:   testTime,
-				Step:  time.Minute,
+				Step:  1 * time.Minute,
 			}, WithTimeout(5*time.Second)),
-			inErr: fmt.Errorf("some error"),
+			inErr: errors.New("some error"),
 
 			reqMethod: "POST",
 			reqPath:   "/api/v1/query_range",
-			reqParam: url.Values{
-				"query":   []string{"2"},
-				"start":   []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":     []string{testTime.Format(time.RFC3339Nano)},
-				"step":    []string{time.Minute.String()},
-				"timeout": []string{(5 * time.Second).String()},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
-			do:        doLabelNames(nil),
+			do:        doLabelNames(nil, testTime.Add(-100*time.Hour), testTime),
 			inRes:     []string{"val1", "val2"},
-			reqMethod: "GET",
+			reqMethod: "POST",
 			reqPath:   "/api/v1/labels",
 			res:       []string{"val1", "val2"},
 		},
 		{
-			do:         doLabelNames(nil),
+			do:         doLabelNames(nil, testTime.Add(-100*time.Hour), testTime),
 			inRes:      []string{"val1", "val2"},
 			inWarnings: []string{"a"},
-			reqMethod:  "GET",
+			reqMethod:  "POST",
 			reqPath:    "/api/v1/labels",
 			res:        []string{"val1", "val2"},
-			warnings:   []string{"a"},
 		},
 
 		{
-			do:        doLabelNames(nil),
-			inErr:     fmt.Errorf("some error"),
-			reqMethod: "GET",
+			do:        doLabelNames(nil, testTime.Add(-100*time.Hour), testTime),
+			inErr:     errors.New("some error"),
+			reqMethod: "POST",
 			reqPath:   "/api/v1/labels",
-			err:       fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 		{
-			do:         doLabelNames(nil),
-			inErr:      fmt.Errorf("some error"),
+			do:         doLabelNames(nil, testTime.Add(-100*time.Hour), testTime),
+			inErr:      errors.New("some error"),
 			inWarnings: []string{"a"},
-			reqMethod:  "GET",
+			reqMethod:  "POST",
 			reqPath:    "/api/v1/labels",
-			err:        fmt.Errorf("some error"),
-			warnings:   []string{"a"},
+			err:        errors.New("some error"),
 		},
 		{
-			do:        doLabelNames([]string{"up"}),
+			do:        doLabelNames([]string{"up"}, testTime.Add(-100*time.Hour), testTime),
 			inRes:     []string{"val1", "val2"},
-			reqMethod: "GET",
+			reqMethod: "POST",
 			reqPath:   "/api/v1/labels",
-			reqParam:  url.Values{"match[]": {"up"}},
 			res:       []string{"val1", "val2"},
 		},
 
 		{
-			do:        doLabelValues(nil, "mylabel"),
+			do:        doLabelValues(nil, "mylabel", testTime.Add(-100*time.Hour), testTime),
 			inRes:     []string{"val1", "val2"},
 			reqMethod: "GET",
 			reqPath:   "/api/v1/label/mylabel/values",
 			res:       model.LabelValues{"val1", "val2"},
 		},
 		{
-			do:         doLabelValues(nil, "mylabel"),
+			do:         doLabelValues(nil, "mylabel", testTime.Add(-100*time.Hour), testTime),
 			inRes:      []string{"val1", "val2"},
 			inWarnings: []string{"a"},
 			reqMethod:  "GET",
 			reqPath:    "/api/v1/label/mylabel/values",
 			res:        model.LabelValues{"val1", "val2"},
-			warnings:   []string{"a"},
 		},
 
 		{
-			do:        doLabelValues(nil, "mylabel"),
-			inErr:     fmt.Errorf("some error"),
+			do:        doLabelValues(nil, "mylabel", testTime.Add(-100*time.Hour), testTime),
+			inErr:     errors.New("some error"),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/label/mylabel/values",
-			err:       fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 		{
-			do:         doLabelValues(nil, "mylabel"),
-			inErr:      fmt.Errorf("some error"),
+			do:         doLabelValues(nil, "mylabel", testTime.Add(-100*time.Hour), testTime),
+			inErr:      errors.New("some error"),
 			inWarnings: []string{"a"},
 			reqMethod:  "GET",
 			reqPath:    "/api/v1/label/mylabel/values",
-			err:        fmt.Errorf("some error"),
-			warnings:   []string{"a"},
+			err:        errors.New("some error"),
 		},
 		{
-			do:        doLabelValues([]string{"up"}, "mylabel"),
+			do:        doLabelValues([]string{"up"}, "mylabel", testTime.Add(-100*time.Hour), testTime),
 			inRes:     []string{"val1", "val2"},
 			reqMethod: "GET",
 			reqPath:   "/api/v1/label/mylabel/values",
-			reqParam:  url.Values{"match[]": {"up"}},
 			res:       model.LabelValues{"val1", "val2"},
 		},
 
@@ -471,15 +427,11 @@ func TestAPIs(t *testing.T) {
 				{
 					"__name__": "up",
 					"job":      "prometheus",
-					"instance": "localhost:9090"},
+					"instance": "localhost:9090",
+				},
 			},
-			reqMethod: "GET",
+			reqMethod: "POST",
 			reqPath:   "/api/v1/series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
 			res: []model.LabelSet{
 				{
 					"__name__": "up",
@@ -495,16 +447,12 @@ func TestAPIs(t *testing.T) {
 				{
 					"__name__": "up",
 					"job":      "prometheus",
-					"instance": "localhost:9090"},
+					"instance": "localhost:9090",
+				},
 			},
 			inWarnings: []string{"a"},
-			reqMethod:  "GET",
+			reqMethod:  "POST",
 			reqPath:    "/api/v1/series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
 			res: []model.LabelSet{
 				{
 					"__name__": "up",
@@ -512,35 +460,23 @@ func TestAPIs(t *testing.T) {
 					"instance": "localhost:9090",
 				},
 			},
-			warnings: []string{"a"},
 		},
 
 		{
 			do:        doSeries("up", testTime.Add(-time.Minute), testTime),
-			inErr:     fmt.Errorf("some error"),
-			reqMethod: "GET",
+			inErr:     errors.New("some error"),
+			reqMethod: "POST",
 			reqPath:   "/api/v1/series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 		// Series with error and warning.
 		{
 			do:         doSeries("up", testTime.Add(-time.Minute), testTime),
-			inErr:      fmt.Errorf("some error"),
+			inErr:      errors.New("some error"),
 			inWarnings: []string{"a"},
-			reqMethod:  "GET",
+			reqMethod:  "POST",
 			reqPath:    "/api/v1/series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err:      fmt.Errorf("some error"),
-			warnings: []string{"a"},
+			err:        errors.New("some error"),
 		},
 
 		{
@@ -550,9 +486,6 @@ func TestAPIs(t *testing.T) {
 			},
 			reqMethod: "POST",
 			reqPath:   "/api/v1/admin/tsdb/snapshot",
-			reqParam: url.Values{
-				"skip_head": []string{"true"},
-			},
 			res: SnapshotResult{
 				Name: "20171210T211224Z-2be650b6d019eb54",
 			},
@@ -560,10 +493,10 @@ func TestAPIs(t *testing.T) {
 
 		{
 			do:        doSnapshot(true),
-			inErr:     fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
 			reqMethod: "POST",
 			reqPath:   "/api/v1/admin/tsdb/snapshot",
-			err:       fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -574,10 +507,10 @@ func TestAPIs(t *testing.T) {
 
 		{
 			do:        doCleanTombstones(),
-			inErr:     fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
 			reqMethod: "POST",
 			reqPath:   "/api/v1/admin/tsdb/clean_tombstones",
-			err:       fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -586,28 +519,19 @@ func TestAPIs(t *testing.T) {
 				{
 					"__name__": "up",
 					"job":      "prometheus",
-					"instance": "localhost:9090"},
+					"instance": "localhost:9090",
+				},
 			},
 			reqMethod: "POST",
 			reqPath:   "/api/v1/admin/tsdb/delete_series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
 		},
 
 		{
 			do:        doDeleteSeries("up", testTime.Add(-time.Minute), testTime),
-			inErr:     fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
 			reqMethod: "POST",
 			reqPath:   "/api/v1/admin/tsdb/delete_series",
-			reqParam: url.Values{
-				"match": []string{"up"},
-				"start": []string{testTime.Add(-time.Minute).Format(time.RFC3339Nano)},
-				"end":   []string{testTime.Format(time.RFC3339Nano)},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -626,8 +550,8 @@ func TestAPIs(t *testing.T) {
 			do:        doConfig(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/config",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -654,16 +578,16 @@ func TestAPIs(t *testing.T) {
 			do:        doFlags(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/flags",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
 			do:        doBuildinfo(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/buildinfo",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -692,8 +616,8 @@ func TestAPIs(t *testing.T) {
 			do:        doRuntimeinfo(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/runtimeinfo",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -760,8 +684,8 @@ func TestAPIs(t *testing.T) {
 			do:        doAlertManagers(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/alertmanagers",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -967,8 +891,8 @@ func TestAPIs(t *testing.T) {
 			do:        doRules(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/rules",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -1047,8 +971,8 @@ func TestAPIs(t *testing.T) {
 			do:        doTargets(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/targets",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -1066,11 +990,6 @@ func TestAPIs(t *testing.T) {
 			},
 			reqMethod: "GET",
 			reqPath:   "/api/v1/targets/metadata",
-			reqParam: url.Values{
-				"match_target": []string{"{job=\"prometheus\"}"},
-				"metric":       []string{"go_goroutines"},
-				"limit":        []string{"1"},
-			},
 			res: []MetricMetadata{
 				{
 					Target: map[string]string{
@@ -1086,15 +1005,10 @@ func TestAPIs(t *testing.T) {
 
 		{
 			do:        doTargetsMetadata("{job=\"prometheus\"}", "go_goroutines", "1"),
-			inErr:     fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/targets/metadata",
-			reqParam: url.Values{
-				"match_target": []string{"{job=\"prometheus\"}"},
-				"metric":       []string{"go_goroutines"},
-				"limit":        []string{"1"},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -1110,12 +1024,8 @@ func TestAPIs(t *testing.T) {
 			},
 			reqMethod: "GET",
 			reqPath:   "/api/v1/metadata",
-			reqParam: url.Values{
-				"metric": []string{"go_goroutines"},
-				"limit":  []string{"1"},
-			},
 			res: map[string][]Metadata{
-				"go_goroutines": []Metadata{
+				"go_goroutines": {
 					{
 						Type: "gauge",
 						Help: "Number of goroutines that currently exist.",
@@ -1127,22 +1037,18 @@ func TestAPIs(t *testing.T) {
 
 		{
 			do:        doMetadata("", "1"),
-			inErr:     fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/metadata",
-			reqParam: url.Values{
-				"metric": []string{""},
-				"limit":  []string{"1"},
-			},
-			err: fmt.Errorf("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
 			do:        doTSDB(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/tsdb",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -1221,8 +1127,8 @@ func TestAPIs(t *testing.T) {
 			do:        doWalReply(),
 			reqMethod: "GET",
 			reqPath:   "/api/v1/status/walreplay",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
@@ -1243,15 +1149,15 @@ func TestAPIs(t *testing.T) {
 
 		{
 			do:        doQueryExemplars("tns_request_duration_seconds_bucket", testTime.Add(-1*time.Minute), testTime),
-			reqMethod: "GET",
+			reqMethod: "POST",
 			reqPath:   "/api/v1/query_exemplars",
-			inErr:     fmt.Errorf("some error"),
-			err:       fmt.Errorf("some error"),
+			inErr:     errors.New("some error"),
+			err:       errors.New("some error"),
 		},
 
 		{
 			do:        doQueryExemplars("tns_request_duration_seconds_bucket", testTime.Add(-1*time.Minute), testTime),
-			reqMethod: "GET",
+			reqMethod: "POST",
 			reqPath:   "/api/v1/query_exemplars",
 			inRes: []interface{}{
 				map[string]interface{}{
@@ -1306,7 +1212,7 @@ func TestAPIs(t *testing.T) {
 	tests = append(tests, queryTests...)
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			tc.curTest = test
 
 			res, warnings, err := test.do()
@@ -1322,7 +1228,9 @@ func TestAPIs(t *testing.T) {
 				if err.Error() != test.err.Error() {
 					t.Errorf("unexpected error: want %s, got %s", test.err, err)
 				}
-				if apiErr, ok := err.(*Error); ok {
+
+				apiErr := &Error{}
+				if ok := errors.As(err, &apiErr); ok {
 					if apiErr.Detail != test.inRes {
 						t.Errorf("%q should be %q", apiErr.Detail, test.inRes)
 					}
@@ -1522,8 +1430,7 @@ func TestAPIClientDo(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-
+		t.Run(strconv.Itoa(i), func(t *testing.T) {
 			tc.ch <- test
 
 			_, body, warnings, err := client.Do(context.Background(), tc.req)
@@ -1534,7 +1441,7 @@ func TestAPIClientDo(t *testing.T) {
 				}
 			} else {
 				if warnings != nil {
-					t.Fatalf("unexpexted warnings: %v", warnings)
+					t.Fatalf("unexpected warnings: %v", warnings)
 				}
 			}
 
@@ -1548,9 +1455,13 @@ func TestAPIClientDo(t *testing.T) {
 				}
 
 				if test.expectedErr.Detail != "" {
-					apiErr := err.(*Error)
-					if apiErr.Detail != test.expectedErr.Detail {
-						t.Fatalf("expected error detail :%v, but got:%v", apiErr.Detail, test.expectedErr.Detail)
+					apiErr := &Error{}
+					if errors.As(err, &apiErr) {
+						if apiErr.Detail != test.expectedErr.Detail {
+							t.Fatalf("expected error detail :%v, but got:%v", apiErr.Detail, test.expectedErr.Detail)
+						}
+					} else {
+						t.Fatalf("expected v1.Error instance, but got:%T", err)
 					}
 				}
 
@@ -1564,11 +1475,10 @@ func TestAPIClientDo(t *testing.T) {
 				t.Fatalf("expected body :%v, but got:%v", test.expectedBody, string(body))
 			}
 		})
-
 	}
 }
 
-func TestSamplesJsonSerialization(t *testing.T) {
+func TestSamplesJSONSerialization(t *testing.T) {
 	tests := []struct {
 		point    model.SamplePair
 		expected string
@@ -1664,6 +1574,162 @@ func TestSamplesJsonSerialization(t *testing.T) {
 	}
 }
 
+func TestHistogramJSONSerialization(t *testing.T) {
+	tests := []struct {
+		name     string
+		point    model.SampleHistogramPair
+		expected string
+	}{
+		{
+			name: "empty histogram",
+			point: model.SampleHistogramPair{
+				Timestamp: 0,
+				Histogram: &model.SampleHistogram{},
+			},
+			expected: `[0,{"count":"0","sum":"0"}]`,
+		},
+		{
+			name: "histogram with NaN/Inf and no buckets",
+			point: model.SampleHistogramPair{
+				Timestamp: 0,
+				Histogram: &model.SampleHistogram{
+					Count: model.FloatString(math.NaN()),
+					Sum:   model.FloatString(math.Inf(1)),
+				},
+			},
+			expected: `[0,{"count":"NaN","sum":"+Inf"}]`,
+		},
+		{
+			name: "six-bucket histogram",
+			point: model.SampleHistogramPair{
+				Timestamp: 1,
+				Histogram: &model.SampleHistogram{
+					Count: 13.5,
+					Sum:   3897.1,
+					Buckets: model.HistogramBuckets{
+						{
+							Boundaries: 1,
+							Lower:      -4870.992343051145,
+							Upper:      -4466.7196729968955,
+							Count:      1,
+						},
+						{
+							Boundaries: 1,
+							Lower:      -861.0779292198035,
+							Upper:      -789.6119426088657,
+							Count:      2,
+						},
+						{
+							Boundaries: 1,
+							Lower:      -558.3399591246119,
+							Upper:      -512,
+							Count:      3,
+						},
+						{
+							Boundaries: 0,
+							Lower:      2048,
+							Upper:      2233.3598364984477,
+							Count:      1.5,
+						},
+						{
+							Boundaries: 0,
+							Lower:      2896.3093757400984,
+							Upper:      3158.4477704354626,
+							Count:      2.5,
+						},
+						{
+							Boundaries: 0,
+							Lower:      4466.7196729968955,
+							Upper:      4870.992343051145,
+							Count:      3.5,
+						},
+					},
+				},
+			},
+			expected: `[0.001,{"count":"13.5","sum":"3897.1","buckets":[[1,"-4870.992343051145","-4466.7196729968955","1"],[1,"-861.0779292198035","-789.6119426088657","2"],[1,"-558.3399591246119","-512","3"],[0,"2048","2233.3598364984477","1.5"],[0,"2896.3093757400984","3158.4477704354626","2.5"],[0,"4466.7196729968955","4870.992343051145","3.5"]]}]`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			b, err := json.Marshal(test.point)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != test.expected {
+				t.Fatalf("Mismatch marshal expected=%s actual=%s", test.expected, string(b))
+			}
+
+			// To test Unmarshal we will Unmarshal then re-Marshal. This way we
+			// can do a string compare, otherwise NaN values don't show equivalence
+			// properly.
+			var sp model.SampleHistogramPair
+			if err = json.Unmarshal(b, &sp); err != nil {
+				t.Fatal(err)
+			}
+
+			b, err = json.Marshal(sp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != test.expected {
+				t.Fatalf("Mismatch marshal expected=%s actual=%s", test.expected, string(b))
+			}
+		})
+	}
+}
+
+func TestSampleStreamJSONSerialization(t *testing.T) {
+	floats, histograms := generateData(1, 5)
+
+	tests := []struct {
+		name         string
+		stream       model.SampleStream
+		expectedJSON string
+	}{
+		{
+			"floats",
+			*floats[0],
+			`{"metric":{"__name__":"timeseries_0","foo":"bar"},"values":[[1677587259.055,"1"],[1677587244.055,"2"],[1677587229.055,"3"],[1677587214.055,"4"],[1677587199.055,"5"]]}`,
+		},
+		{
+			"histograms",
+			*histograms[0],
+			`{"metric":{"__name__":"timeseries_0","foo":"bar"},"histograms":[[1677587259.055,{"count":"13.5","sum":"0.1","buckets":[[1,"-4870.992343051145","-4466.7196729968955","1"],[1,"-861.0779292198035","-789.6119426088657","2"],[1,"-558.3399591246119","-512","3"],[0,"2048","2233.3598364984477","1.5"],[0,"2896.3093757400984","3158.4477704354626","2.5"],[0,"4466.7196729968955","4870.992343051145","3.5"]]}],[1677587244.055,{"count":"27","sum":"0.2","buckets":[[1,"-4870.992343051145","-4466.7196729968955","2"],[1,"-861.0779292198035","-789.6119426088657","4"],[1,"-558.3399591246119","-512","6"],[0,"2048","2233.3598364984477","3"],[0,"2896.3093757400984","3158.4477704354626","5"],[0,"4466.7196729968955","4870.992343051145","7"]]}],[1677587229.055,{"count":"40.5","sum":"0.30000000000000004","buckets":[[1,"-4870.992343051145","-4466.7196729968955","3"],[1,"-861.0779292198035","-789.6119426088657","6"],[1,"-558.3399591246119","-512","9"],[0,"2048","2233.3598364984477","4.5"],[0,"2896.3093757400984","3158.4477704354626","7.5"],[0,"4466.7196729968955","4870.992343051145","10.5"]]}],[1677587214.055,{"count":"54","sum":"0.4","buckets":[[1,"-4870.992343051145","-4466.7196729968955","4"],[1,"-861.0779292198035","-789.6119426088657","8"],[1,"-558.3399591246119","-512","12"],[0,"2048","2233.3598364984477","6"],[0,"2896.3093757400984","3158.4477704354626","10"],[0,"4466.7196729968955","4870.992343051145","14"]]}],[1677587199.055,{"count":"67.5","sum":"0.5","buckets":[[1,"-4870.992343051145","-4466.7196729968955","5"],[1,"-861.0779292198035","-789.6119426088657","10"],[1,"-558.3399591246119","-512","15"],[0,"2048","2233.3598364984477","7.5"],[0,"2896.3093757400984","3158.4477704354626","12.5"],[0,"4466.7196729968955","4870.992343051145","17.5"]]}]]}`,
+		},
+		{
+			"both",
+			model.SampleStream{
+				Metric:     floats[0].Metric,
+				Values:     floats[0].Values,
+				Histograms: histograms[0].Histograms,
+			},
+			`{"metric":{"__name__":"timeseries_0","foo":"bar"},"values":[[1677587259.055,"1"],[1677587244.055,"2"],[1677587229.055,"3"],[1677587214.055,"4"],[1677587199.055,"5"]],"histograms":[[1677587259.055,{"count":"13.5","sum":"0.1","buckets":[[1,"-4870.992343051145","-4466.7196729968955","1"],[1,"-861.0779292198035","-789.6119426088657","2"],[1,"-558.3399591246119","-512","3"],[0,"2048","2233.3598364984477","1.5"],[0,"2896.3093757400984","3158.4477704354626","2.5"],[0,"4466.7196729968955","4870.992343051145","3.5"]]}],[1677587244.055,{"count":"27","sum":"0.2","buckets":[[1,"-4870.992343051145","-4466.7196729968955","2"],[1,"-861.0779292198035","-789.6119426088657","4"],[1,"-558.3399591246119","-512","6"],[0,"2048","2233.3598364984477","3"],[0,"2896.3093757400984","3158.4477704354626","5"],[0,"4466.7196729968955","4870.992343051145","7"]]}],[1677587229.055,{"count":"40.5","sum":"0.30000000000000004","buckets":[[1,"-4870.992343051145","-4466.7196729968955","3"],[1,"-861.0779292198035","-789.6119426088657","6"],[1,"-558.3399591246119","-512","9"],[0,"2048","2233.3598364984477","4.5"],[0,"2896.3093757400984","3158.4477704354626","7.5"],[0,"4466.7196729968955","4870.992343051145","10.5"]]}],[1677587214.055,{"count":"54","sum":"0.4","buckets":[[1,"-4870.992343051145","-4466.7196729968955","4"],[1,"-861.0779292198035","-789.6119426088657","8"],[1,"-558.3399591246119","-512","12"],[0,"2048","2233.3598364984477","6"],[0,"2896.3093757400984","3158.4477704354626","10"],[0,"4466.7196729968955","4870.992343051145","14"]]}],[1677587199.055,{"count":"67.5","sum":"0.5","buckets":[[1,"-4870.992343051145","-4466.7196729968955","5"],[1,"-861.0779292198035","-789.6119426088657","10"],[1,"-558.3399591246119","-512","15"],[0,"2048","2233.3598364984477","7.5"],[0,"2896.3093757400984","3158.4477704354626","12.5"],[0,"4466.7196729968955","4870.992343051145","17.5"]]}]]}`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			b, err := json.Marshal(test.stream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(b) != test.expectedJSON {
+				t.Fatalf("Mismatch marshal expected=%s actual=%s", test.expectedJSON, string(b))
+			}
+
+			var stream model.SampleStream
+			if err = json.Unmarshal(b, &stream); err != nil {
+				t.Fatal(err)
+			}
+
+			if !reflect.DeepEqual(test.stream, stream) {
+				t.Fatalf("Mismatch after unmarshal expected=%#v actual=%#v", test.stream, stream)
+			}
+		})
+	}
+}
+
 type httpTestClient struct {
 	client http.Client
 }
@@ -1681,7 +1747,7 @@ func (c *httpTestClient) Do(ctx context.Context, req *http.Request) (*http.Respo
 	var body []byte
 	done := make(chan struct{})
 	go func() {
-		body, err = ioutil.ReadAll(resp.Body)
+		body, err = io.ReadAll(resp.Body)
 		close(done)
 	}()
 

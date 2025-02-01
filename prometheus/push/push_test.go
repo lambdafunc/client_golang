@@ -15,7 +15,8 @@ package push
 
 import (
 	"bytes"
-	"io/ioutil"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -26,11 +27,11 @@ import (
 )
 
 func TestPush(t *testing.T) {
-
 	var (
 		lastMethod string
 		lastBody   []byte
 		lastPath   string
+		lastHeader http.Header
 	)
 
 	// Fake a Pushgateway that responds with 202 to DELETE and with 200 in
@@ -38,8 +39,9 @@ func TestPush(t *testing.T) {
 	pgwOK := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			lastMethod = r.Method
+			lastHeader = r.Header
 			var err error
-			lastBody, err = ioutil.ReadAll(r.Body)
+			lastBody, err = io.ReadAll(r.Body)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -82,7 +84,7 @@ func TestPush(t *testing.T) {
 	}
 
 	buf := &bytes.Buffer{}
-	enc := expfmt.NewEncoder(buf, expfmt.FmtProtoDelim)
+	enc := expfmt.NewEncoder(buf, expfmt.NewFormat(expfmt.TypeProtoDelim))
 
 	for _, mf := range mfs {
 		if err := enc.Encode(mf); err != nil {
@@ -201,8 +203,8 @@ func TestPush(t *testing.T) {
 		Push(); err == nil {
 		t.Error("push with empty job succeeded")
 	} else {
-		if got, want := err, errJobEmpty; got != want {
-			t.Errorf("got error %q, want %q", got, want)
+		if want := errJobEmpty; !errors.Is(err, want) {
+			t.Errorf("got error %q, want %q", err, want)
 		}
 	}
 
@@ -227,7 +229,7 @@ func TestPush(t *testing.T) {
 		t.Error("push with grouping contained in metrics succeeded")
 	}
 	if err := New(pgwOK.URL, "testjob").
-		Grouping("foo-bar", "bums").
+		Grouping("foo\x80bar", "bums").
 		Collector(metric1).
 		Collector(metric2).
 		Push(); err == nil {
@@ -280,5 +282,28 @@ func TestPush(t *testing.T) {
 	}
 	if lastPath != "/metrics/job/testjob/a/x/b/y" && lastPath != "/metrics/job/testjob/b/y/a/x" {
 		t.Error("unexpected path:", lastPath)
+	}
+
+	// Push some Collectors with custom header, all good.
+	header := make(http.Header)
+	header.Set("Authorization", "Bearer Token")
+	if err := New(pgwOK.URL, "testjob").
+		Collector(metric1).
+		Collector(metric2).
+		Header(header).
+		Push(); err != nil {
+		t.Fatal(err)
+	}
+	if lastMethod != http.MethodPut {
+		t.Errorf("got method %q for Add, want %q", lastMethod, http.MethodPut)
+	}
+	if !bytes.Equal(lastBody, wantBody) {
+		t.Errorf("got body %v, want %v", lastBody, wantBody)
+	}
+	if lastPath != "/metrics/job/testjob" {
+		t.Error("unexpected path:", lastPath)
+	}
+	if lastHeader == nil || lastHeader.Get("Authorization") == "" {
+		t.Error("empty Authorization header")
 	}
 }

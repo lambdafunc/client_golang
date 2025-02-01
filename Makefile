@@ -11,6 +11,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+include .bingo/Variables.mk
 include Makefile.common
 
 .PHONY: test
@@ -18,3 +19,21 @@ test: deps common-test
 
 .PHONY: test-short
 test-short: deps common-test-short
+
+.PHONY: generate-go-collector-test-files
+file := supported_go_versions.txt
+VERSIONS := $(shell cat ${file})
+generate-go-collector-test-files:
+	for GO_VERSION in $(VERSIONS); do \
+		docker run \
+			--platform linux/amd64 \
+			--rm -v $(PWD):/workspace \
+			-w /workspace \
+			golang:$$GO_VERSION \
+			bash ./generate-go-collector.bash; \
+	done; \
+	go mod tidy
+
+.PHONY: fmt
+fmt: common-format
+	$(GOIMPORTS) -local github.com/prometheus/client_golang -w .

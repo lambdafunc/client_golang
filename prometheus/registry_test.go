@@ -23,23 +23,22 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	dto "github.com/prometheus/client_model/go"
-
-	//nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
-	"github.com/golang/protobuf/proto"
-	"github.com/prometheus/common/expfmt"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // uncheckedCollector wraps a Collector but its Describe method yields no Desc.
@@ -94,7 +93,7 @@ func testHandler(t testing.TB) {
 		},
 	}
 	externalBuf := &bytes.Buffer{}
-	enc := expfmt.NewEncoder(externalBuf, expfmt.FmtProtoDelim)
+	enc := expfmt.NewEncoder(externalBuf, expfmt.NewFormat(expfmt.TypeProtoDelim))
 	if err := enc.Encode(externalMetricFamily); err != nil {
 		t.Fatal(err)
 	}
@@ -121,8 +120,8 @@ metric: <
 >
 
 `)
-	externalMetricFamilyAsProtoCompactText := []byte(`name:"externalname" help:"externaldocstring" type:COUNTER metric:<label:<name:"externalconstname" value:"externalconstvalue" > label:<name:"externallabelname" value:"externalval1" > counter:<value:1 > > 
-`)
+	externalMetricFamilyAsProtoCompactText := []byte(`name:"externalname" help:"externaldocstring" type:COUNTER metric:<label:<name:"externalconstname" value:"externalconstvalue" > label:<name:"externallabelname" value:"externalval1" > counter:<value:1 > >`)
+	externalMetricFamilyAsProtoCompactText = append(externalMetricFamilyAsProtoCompactText, []byte(" \n")...)
 
 	expectedMetricFamily := &dto.MetricFamily{
 		Name: proto.String("name"),
@@ -141,7 +140,8 @@ metric: <
 					},
 				},
 				Counter: &dto.Counter{
-					Value: proto.Float64(1),
+					Value:            proto.Float64(1),
+					CreatedTimestamp: timestamppb.New(time.Now()),
 				},
 			},
 			{
@@ -156,13 +156,14 @@ metric: <
 					},
 				},
 				Counter: &dto.Counter{
-					Value: proto.Float64(1),
+					Value:            proto.Float64(1),
+					CreatedTimestamp: timestamppb.New(time.Now()),
 				},
 			},
 		},
 	}
 	buf := &bytes.Buffer{}
-	enc = expfmt.NewEncoder(buf, expfmt.FmtProtoDelim)
+	enc = expfmt.NewEncoder(buf, expfmt.NewFormat(expfmt.TypeProtoDelim))
 	if err := enc.Encode(expectedMetricFamily); err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +204,8 @@ metric: <
 >
 
 `)
-	expectedMetricFamilyAsProtoCompactText := []byte(`name:"name" help:"docstring" type:COUNTER metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val1" > counter:<value:1 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val2" > counter:<value:1 > > 
-`)
+	expectedMetricFamilyAsProtoCompactText := []byte(`name:"name" help:"docstring" type:COUNTER metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val1" > counter:<value:1 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val2" > counter:<value:1 > >`)
+	expectedMetricFamilyAsProtoCompactText = append(expectedMetricFamilyAsProtoCompactText, []byte(" \n")...)
 
 	externalMetricFamilyWithSameName := &dto.MetricFamily{
 		Name: proto.String("name"),
@@ -229,8 +230,8 @@ metric: <
 		},
 	}
 
-	expectedMetricFamilyMergedWithExternalAsProtoCompactText := []byte(`name:"name" help:"docstring" type:COUNTER metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"different_val" > counter:<value:42 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val1" > counter:<value:1 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val2" > counter:<value:1 > > 
-`)
+	expectedMetricFamilyMergedWithExternalAsProtoCompactText := []byte(`name:"name" help:"docstring" type:COUNTER metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"different_val" > counter:<value:42 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val1" > counter:<value:1 > > metric:<label:<name:"constname" value:"constvalue" > label:<name:"labelname" value:"val2" > counter:<value:1 > >`)
+	expectedMetricFamilyMergedWithExternalAsProtoCompactText = append(expectedMetricFamilyMergedWithExternalAsProtoCompactText, []byte(" \n")...)
 
 	externalMetricFamilyWithInvalidLabelValue := &dto.MetricFamily{
 		Name: proto.String("name"),
@@ -349,7 +350,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 		body    []byte
 	}
 
-	var scenarios = []struct {
+	scenarios := []struct {
 		headers    map[string]string
 		out        output
 		collector  prometheus.Collector
@@ -361,7 +362,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: []byte{},
 			},
@@ -372,7 +373,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: []byte{},
 			},
@@ -383,7 +384,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: []byte{},
 			},
@@ -394,7 +395,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=underscores`,
 				},
 				body: []byte{},
 			},
@@ -405,7 +406,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: expectedMetricFamilyAsText,
 			},
@@ -417,7 +418,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=underscores`,
 				},
 				body: expectedMetricFamilyAsBytes,
 			},
@@ -429,7 +430,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: externalMetricFamilyAsText,
 			},
@@ -441,7 +442,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=underscores`,
 				},
 				body: externalMetricFamilyAsBytes,
 			},
@@ -453,7 +454,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -472,7 +473,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: []byte{},
 			},
@@ -483,7 +484,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: expectedMetricFamilyAsText,
 			},
@@ -495,7 +496,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -514,7 +515,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -533,7 +534,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=text`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=text; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -552,7 +553,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=compact-text`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=compact-text; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -571,7 +572,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=compact-text`,
+					"Content-Type": `application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=compact-text; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -609,7 +610,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: expectedMetricFamilyAsText,
 			},
@@ -666,7 +667,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8; escaping=underscores`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -713,7 +714,7 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 		}
 		writer := httptest.NewRecorder()
 		handler := promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{})
-		request, _ := http.NewRequest("GET", "/", nil)
+		request, _ := http.NewRequest(http.MethodGet, "/", nil)
 		for key, value := range scenario.headers {
 			request.Header.Add(key, value)
 		}
@@ -728,7 +729,11 @@ collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"
 			}
 		}
 
-		if !bytes.Equal(scenario.out.body, writer.Body.Bytes()) {
+		var outMF dto.MetricFamily
+		var writerMF dto.MetricFamily
+		proto.Unmarshal(scenario.out.body, &outMF)
+		proto.Unmarshal(writer.Body.Bytes(), &writerMF)
+		if !proto.Equal(&outMF, &writerMF) {
 			t.Errorf(
 				"%d. expected body:\n%s\ngot body:\n%s\n",
 				i, scenario.out.body, writer.Body.Bytes(),
@@ -851,7 +856,8 @@ func TestAlreadyRegistered(t *testing.T) {
 			if err = s.reRegisterWith(reg).Register(s.newCollector); err == nil {
 				t.Fatal("expected error when registering new collector")
 			}
-			if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
+			are := &prometheus.AlreadyRegisteredError{}
+			if errors.As(err, are) {
 				if are.ExistingCollector != s.originalCollector {
 					t.Error("expected original collector but got something else")
 				}
@@ -932,7 +938,7 @@ func TestHistogramVecRegisterGatherConcurrency(t *testing.T) {
 				return
 			default:
 				if err := reg.Register(hv); err != nil {
-					if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+					if !errors.As(err, &prometheus.AlreadyRegisteredError{}) {
 						t.Error("Registering failed:", err)
 					}
 				}
@@ -1066,7 +1072,7 @@ test_summary_count{name="foo"} 2
 	gauge.With(prometheus.Labels{"name": "baz"}).Set(1.1)
 	counter.With(prometheus.Labels{"name": "qux"}).Inc()
 
-	tmpfile, err := ioutil.TempFile("", "prom_registry_test")
+	tmpfile, err := os.CreateTemp("", "prom_registry_test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,7 +1082,7 @@ test_summary_count{name="foo"} 2
 		t.Fatal(err)
 	}
 
-	fileBytes, err := ioutil.ReadFile(tmpfile.Name())
+	fileBytes, err := os.ReadFile(tmpfile.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1099,7 +1105,7 @@ type collidingCollector struct {
 	a, b, c, d prometheus.Collector
 }
 
-// Describe satisifies part of the prometheus.Collector interface.
+// Describe satisfies part of the prometheus.Collector interface.
 func (m *collidingCollector) Describe(desc chan<- *prometheus.Desc) {
 	m.a.Describe(desc)
 	m.b.Describe(desc)
@@ -1107,7 +1113,7 @@ func (m *collidingCollector) Describe(desc chan<- *prometheus.Desc) {
 	m.d.Describe(desc)
 }
 
-// Collect satisifies part of the prometheus.Collector interface.
+// Collect satisfies part of the prometheus.Collector interface.
 func (m *collidingCollector) Collect(metric chan<- prometheus.Metric) {
 	m.a.Collect(metric)
 	m.b.Collect(metric)
@@ -1118,7 +1124,6 @@ func (m *collidingCollector) Collect(metric chan<- prometheus.Metric) {
 // TestAlreadyRegistered will fail with the old, weaker hash function.  It is
 // taken from https://play.golang.org/p/HpV7YE6LI_4 , authored by @awilliams.
 func TestAlreadyRegisteredCollision(t *testing.T) {
-
 	reg := prometheus.NewRegistry()
 
 	for i := 0; i < 10000; i++ {
@@ -1164,15 +1169,15 @@ func TestAlreadyRegisteredCollision(t *testing.T) {
 		// Register should not fail, since each collector has a unique
 		// set of sub-collectors, determined by their names and const label values.
 		if err := reg.Register(&collector); err != nil {
-			alreadyRegErr, ok := err.(prometheus.AlreadyRegisteredError)
-			if !ok {
+			are := &prometheus.AlreadyRegisteredError{}
+			if !errors.As(err, are) {
 				t.Fatal(err)
 			}
 
-			previous := alreadyRegErr.ExistingCollector.(*collidingCollector)
-			current := alreadyRegErr.NewCollector.(*collidingCollector)
+			previous := are.ExistingCollector.(*collidingCollector)
+			current := are.NewCollector.(*collidingCollector)
 
-			t.Errorf("Unexpected registration error: %q\nprevious collector: %s (i=%d)\ncurrent collector %s (i=%d)", alreadyRegErr, previous.name, previous.i, current.name, current.i)
+			t.Errorf("Unexpected registration error: %q\nprevious collector: %s (i=%d)\ncurrent collector %s (i=%d)", are, previous.name, previous.i, current.name, current.i)
 		}
 	}
 }
@@ -1242,7 +1247,7 @@ func TestNewMultiTRegistry(t *testing.T) {
 	t.Run("two registries, one with error", func(t *testing.T) {
 		m := prometheus.NewMultiTRegistry(prometheus.ToTransactionalGatherer(reg), treg)
 		ret, done, err := m.Gather()
-		if err != treg.err {
+		if !errors.Is(err, treg.err) {
 			t.Error("unexpected error:", err)
 		}
 		done()
@@ -1254,4 +1259,83 @@ func TestNewMultiTRegistry(t *testing.T) {
 			t.Error("inner transactional registry not marked as done")
 		}
 	})
+}
+
+// This example shows how to use multiple registries for registering and
+// unregistering groups of metrics.
+func ExampleRegistry_grouping() {
+	// Create a global registry.
+	globalReg := prometheus.NewRegistry()
+
+	// Spawn 10 workers, each of which will have their own group of metrics.
+	for i := 0; i < 10; i++ {
+		// Create a new registry for each worker, which acts as a group of
+		// worker-specific metrics.
+		workerReg := prometheus.NewRegistry()
+		globalReg.Register(workerReg)
+
+		go func(workerID int) {
+			// Once the worker is done, it can unregister itself.
+			defer globalReg.Unregister(workerReg)
+
+			workTime := prometheus.NewCounter(prometheus.CounterOpts{
+				Name: "worker_total_work_time_milliseconds",
+				ConstLabels: prometheus.Labels{
+					// Generate a label unique to this worker so its metric doesn't
+					// collide with the metrics from other workers.
+					"worker_id": strconv.Itoa(workerID),
+				},
+			})
+			workerReg.MustRegister(workTime)
+
+			start := time.Now()
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
+			workTime.Add(float64(time.Since(start).Milliseconds()))
+		}(i)
+	}
+}
+
+type customCollector struct {
+	collectFunc func(ch chan<- prometheus.Metric)
+}
+
+func (co *customCollector) Describe(_ chan<- *prometheus.Desc) {}
+
+func (co *customCollector) Collect(ch chan<- prometheus.Metric) {
+	co.collectFunc(ch)
+}
+
+// TestCheckMetricConsistency
+func TestCheckMetricConsistency(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	timestamp := time.Now()
+
+	desc := prometheus.NewDesc("metric_a", "", nil, nil)
+	metric := prometheus.MustNewConstMetric(desc, prometheus.CounterValue, 1)
+
+	validCollector := &customCollector{
+		collectFunc: func(ch chan<- prometheus.Metric) {
+			ch <- prometheus.NewMetricWithTimestamp(timestamp.Add(-1*time.Minute), metric)
+			ch <- prometheus.NewMetricWithTimestamp(timestamp, metric)
+		},
+	}
+	reg.MustRegister(validCollector)
+	_, err := reg.Gather()
+	if err != nil {
+		t.Error("metric validation should succeed:", err)
+	}
+	reg.Unregister(validCollector)
+
+	invalidCollector := &customCollector{
+		collectFunc: func(ch chan<- prometheus.Metric) {
+			ch <- prometheus.NewMetricWithTimestamp(timestamp, metric)
+			ch <- prometheus.NewMetricWithTimestamp(timestamp, metric)
+		},
+	}
+	reg.MustRegister(invalidCollector)
+	_, err = reg.Gather()
+	if err == nil {
+		t.Error("metric validation should return an error")
+	}
+	reg.Unregister(invalidCollector)
 }
