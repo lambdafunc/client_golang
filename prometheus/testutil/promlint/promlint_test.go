@@ -14,10 +14,13 @@
 package promlint_test
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/prometheus/client_golang/prometheus/testutil/promlint"
 )
@@ -330,7 +333,8 @@ thermometers_rankine 10
 				Metric: "thermometers_rankine",
 				Text:   `use base unit "celsius" instead of "rankine"`,
 			}},
-		}, {
+		},
+		{
 			name: "inches",
 			in: `
 # HELP x_inches Test metric.
@@ -341,7 +345,8 @@ x_inches 10
 				Metric: "x_inches",
 				Text:   `use base unit "meters" instead of "inches"`,
 			}},
-		}, {
+		},
+		{
 			name: "yards",
 			in: `
 # HELP x_yards Test metric.
@@ -352,7 +357,8 @@ x_yards 10
 				Metric: "x_yards",
 				Text:   `use base unit "meters" instead of "yards"`,
 			}},
-		}, {
+		},
+		{
 			name: "miles",
 			in: `
 # HELP x_miles Test metric.
@@ -363,7 +369,8 @@ x_miles 10
 				Metric: "x_miles",
 				Text:   `use base unit "meters" instead of "miles"`,
 			}},
-		}, {
+		},
+		{
 			name: "bits",
 			in: `
 # HELP x_bits Test metric.
@@ -662,7 +669,6 @@ func TestLintMetricTypeInName(t *testing.T) {
 		twoProbTest,
 		genTest("instance_memory_limit_bytes_gauge", "gauge", "gauge"),
 		genTest("request_duration_seconds_summary", "summary", "summary"),
-		genTest("request_duration_seconds_summary", "histogram", "summary"),
 		genTest("request_duration_seconds_histogram", "histogram", "histogram"),
 		genTest("request_duration_seconds_HISTOGRAM", "histogram", "histogram"),
 
@@ -728,7 +734,7 @@ request_duration_seconds{httpService="foo"} 10
 func TestLintUnitAbbreviations(t *testing.T) {
 	genTest := func(n string) test {
 		return test{
-			name: fmt.Sprintf("%s with abbreviated unit", n),
+			name: n + " with abbreviated unit",
 			in: fmt.Sprintf(`
 # HELP %s Test metric.
 # TYPE %s gauge
@@ -781,4 +787,80 @@ func runTests(t *testing.T, tests []test) {
 			}
 		})
 	}
+}
+
+func TestCustomValidations(t *testing.T) {
+	lintAndVerify := func(l *promlint.Linter, cv test) {
+		problems, err := l.Lint()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if want, got := cv.problems, problems; !reflect.DeepEqual(want, got) {
+			t.Fatalf("unexpected problems:\n- want: %v\n-  got: %v",
+				want, got)
+		}
+	}
+
+	prob := []promlint.Problem{
+		{
+			Metric: "mc_something_total",
+			Text:   "expected metric name to start with 'memcached_'",
+		},
+	}
+
+	cv := test{
+		name: "metric without necessary prefix",
+		in: `
+# HELP mc_something_total Test metric.
+# TYPE mc_something_total counter
+mc_something_total 10
+`,
+		problems: nil,
+	}
+
+	prefixValidation := func(mf *dto.MetricFamily) []error {
+		if !strings.HasPrefix(mf.GetName(), "memcached_") {
+			return []error{errors.New("expected metric name to start with 'memcached_'")}
+		}
+		return nil
+	}
+
+	t.Helper()
+	t.Run(cv.name, func(t *testing.T) {
+		// no problems
+		l1 := promlint.New(strings.NewReader(cv.in))
+		lintAndVerify(l1, cv)
+	})
+	t.Run(cv.name, func(t *testing.T) {
+		// prefix problems
+		l2 := promlint.New(strings.NewReader(cv.in))
+		l2.AddCustomValidations(prefixValidation)
+		cv.problems = prob
+		lintAndVerify(l2, cv)
+	})
+}
+
+func TestLintDuplicateMetric(t *testing.T) {
+	const msg = "metric not unique"
+
+	tests := []test{
+		{
+			name: "metric not unique",
+			in: `
+# HELP not_unique_total the helptext
+# TYPE not_unique_total counter
+not_unique_total{bar="abc", spam="xyz"} 1
+not_unique_total{bar="abc", spam="xyz"} 2
+`,
+			problems: []promlint.Problem{
+				{
+					Metric: "not_unique_total",
+					Text:   msg,
+				},
+			},
+		},
+	}
+
+	runTests(t, tests)
 }

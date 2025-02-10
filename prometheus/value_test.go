@@ -14,8 +14,11 @@
 package prometheus
 
 import (
-	"fmt"
 	"testing"
+	"time"
+
+	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestNewConstMetricInvalidLabelValues(t *testing.T) {
@@ -47,10 +50,61 @@ func TestNewConstMetricInvalidLabelValues(t *testing.T) {
 
 		expectPanic(t, func() {
 			MustNewConstMetric(metricDesc, CounterValue, 0.3, "\xFF")
-		}, fmt.Sprintf("WithLabelValues: expected panic because: %s", test.desc))
+		}, "WithLabelValues: expected panic because: "+test.desc)
 
 		if _, err := NewConstMetric(metricDesc, CounterValue, 0.3, "\xFF"); err == nil {
 			t.Errorf("NewConstMetric: expected error because: %s", test.desc)
 		}
+	}
+}
+
+func TestNewConstMetricWithCreatedTimestamp(t *testing.T) {
+	now := time.Now()
+
+	for _, tcase := range []struct {
+		desc             string
+		metricType       ValueType
+		createdTimestamp time.Time
+		expecErr         bool
+		expectedCt       *timestamppb.Timestamp
+	}{
+		{
+			desc:             "gauge with CT",
+			metricType:       GaugeValue,
+			createdTimestamp: now,
+			expecErr:         true,
+			expectedCt:       nil,
+		},
+		{
+			desc:             "counter with CT",
+			metricType:       CounterValue,
+			createdTimestamp: now,
+			expecErr:         false,
+			expectedCt:       timestamppb.New(now),
+		},
+	} {
+		t.Run(tcase.desc, func(t *testing.T) {
+			metricDesc := NewDesc(
+				"sample_value",
+				"sample value",
+				nil,
+				nil,
+			)
+			m, err := NewConstMetricWithCreatedTimestamp(metricDesc, tcase.metricType, float64(1), tcase.createdTimestamp)
+			if tcase.expecErr && err == nil {
+				t.Errorf("Expected error is test %s, got no err", tcase.desc)
+			}
+			if !tcase.expecErr && err != nil {
+				t.Errorf("Didn't expect error in test %s, got %s", tcase.desc, err.Error())
+			}
+
+			if tcase.expectedCt != nil {
+				var metric dto.Metric
+				m.Write(&metric)
+				if metric.Counter.CreatedTimestamp.AsTime() != tcase.expectedCt.AsTime() {
+					t.Errorf("Expected timestamp %v, got %v", tcase.expectedCt, &metric.Counter.CreatedTimestamp)
+				}
+			}
+		})
 	}
 }

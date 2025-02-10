@@ -15,17 +15,17 @@
 // builder approach. Create a Pusher with New and then add the various options
 // by using its methods, finally calling Add or Push, like this:
 //
-//    // Easy case:
-//    push.New("http://example.org/metrics", "my_job").Gatherer(myRegistry).Push()
+//	// Easy case:
+//	push.New("http://example.org/metrics", "my_job").Gatherer(myRegistry).Push()
 //
-//    // Complex case:
-//    push.New("http://example.org/metrics", "my_job").
-//        Collector(myCollector1).
-//        Collector(myCollector2).
-//        Grouping("zone", "xy").
-//        Client(&myHTTPClient).
-//        BasicAuth("top", "secret").
-//        Add()
+//	// Complex case:
+//	push.New("http://example.org/metrics", "my_job").
+//	    Collector(myCollector1).
+//	    Collector(myCollector2).
+//	    Grouping("zone", "xy").
+//	    Client(&myHTTPClient).
+//	    BasicAuth("top", "secret").
+//	    Add()
 //
 // See the examples section for more detailed examples.
 //
@@ -40,7 +40,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -77,6 +77,7 @@ type Pusher struct {
 	registerer prometheus.Registerer
 
 	client             HTTPDoer
+	header             http.Header
 	useBasicAuth       bool
 	username, password string
 
@@ -98,9 +99,7 @@ func New(url, job string) *Pusher {
 	if !strings.Contains(url, "://") {
 		url = "http://" + url
 	}
-	if strings.HasSuffix(url, "/") {
-		url = url[:len(url)-1]
-	}
+	url = strings.TrimSuffix(url, "/")
 
 	return &Pusher{
 		error:      err,
@@ -110,7 +109,7 @@ func New(url, job string) *Pusher {
 		gatherers:  prometheus.Gatherers{reg},
 		registerer: reg,
 		client:     &http.Client{},
-		expfmt:     expfmt.FmtProtoDelim,
+		expfmt:     expfmt.NewFormat(expfmt.TypeProtoDelim),
 	}
 }
 
@@ -170,6 +169,11 @@ func (p *Pusher) Collector(c prometheus.Collector) *Pusher {
 	return p
 }
 
+// Error returns the error that was encountered.
+func (p *Pusher) Error() error {
+	return p.error
+}
+
 // Grouping adds a label pair to the grouping key of the Pusher, replacing any
 // previously added label pair with the same label name. Note that setting any
 // labels in the grouping key that are already contained in the metrics to push
@@ -195,6 +199,13 @@ func (p *Pusher) Grouping(name, value string) *Pusher {
 // Since *http.Client naturally implements that interface, it can still be used normally.
 func (p *Pusher) Client(c HTTPDoer) *Pusher {
 	p.client = c
+	return p
+}
+
+// Header sets a custom HTTP header for the Pusher's client. For convenience, this method
+// returns a pointer to the Pusher itself.
+func (p *Pusher) Header(header http.Header) *Pusher {
+	p.header = header
 	return p
 }
 
@@ -233,6 +244,9 @@ func (p *Pusher) Delete() error {
 	if err != nil {
 		return err
 	}
+	if p.header != nil {
+		req.Header = p.header
+	}
 	if p.useBasicAuth {
 		req.SetBasicAuth(p.username, p.password)
 	}
@@ -242,7 +256,7 @@ func (p *Pusher) Delete() error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusAccepted {
-		body, _ := ioutil.ReadAll(resp.Body) // Ignore any further error as this is for an error message only.
+		body, _ := io.ReadAll(resp.Body) // Ignore any further error as this is for an error message only.
 		return fmt.Errorf("unexpected status code %d while deleting %s: %s", resp.StatusCode, p.fullURL(), body)
 	}
 	return nil
@@ -273,11 +287,18 @@ func (p *Pusher) push(ctx context.Context, method string) error {
 				}
 			}
 		}
-		enc.Encode(mf)
+		if err := enc.Encode(mf); err != nil {
+			return fmt.Errorf(
+				"failed to encode metric family %s, error is %w",
+				mf.GetName(), err)
+		}
 	}
 	req, err := http.NewRequestWithContext(ctx, method, p.fullURL(), buf)
 	if err != nil {
 		return err
+	}
+	if p.header != nil {
+		req.Header = p.header
 	}
 	if p.useBasicAuth {
 		req.SetBasicAuth(p.username, p.password)
@@ -290,7 +311,7 @@ func (p *Pusher) push(ctx context.Context, method string) error {
 	defer resp.Body.Close()
 	// Depending on version and configuration of the PGW, StatusOK or StatusAccepted may be returned.
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := ioutil.ReadAll(resp.Body) // Ignore any further error as this is for an error message only.
+		body, _ := io.ReadAll(resp.Body) // Ignore any further error as this is for an error message only.
 		return fmt.Errorf("unexpected status code %d while pushing to %s: %s", resp.StatusCode, p.fullURL(), body)
 	}
 	return nil

@@ -39,14 +39,16 @@ package testutil
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
-	"reflect"
+	"net/http"
 
-	"github.com/davecgh/go-spew/spew"
-	"github.com/prometheus/common/expfmt"
-
+	"github.com/kylelemons/godebug/diff"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/internal"
@@ -101,7 +103,9 @@ func ToFloat64(c prometheus.Collector) float64 {
 	}
 
 	pb := &dto.Metric{}
-	m.Write(pb)
+	if err := m.Write(pb); err != nil {
+		panic(fmt.Errorf("error happened while collecting metrics: %w", err))
+	}
 	if pb.Gauge != nil {
 		return pb.Gauge.GetValue()
 	}
@@ -124,7 +128,7 @@ func ToFloat64(c prometheus.Collector) float64 {
 func CollectAndCount(c prometheus.Collector, metricNames ...string) int {
 	reg := prometheus.NewPedanticRegistry()
 	if err := reg.Register(c); err != nil {
-		panic(fmt.Errorf("registering collector failed: %s", err))
+		panic(fmt.Errorf("registering collector failed: %w", err))
 	}
 	result, err := GatherAndCount(reg, metricNames...)
 	if err != nil {
@@ -140,7 +144,7 @@ func CollectAndCount(c prometheus.Collector, metricNames ...string) int {
 func GatherAndCount(g prometheus.Gatherer, metricNames ...string) (int, error) {
 	got, err := g.Gather()
 	if err != nil {
-		return 0, fmt.Errorf("gathering metrics failed: %s", err)
+		return 0, fmt.Errorf("gathering metrics failed: %w", err)
 	}
 	if metricNames != nil {
 		got = filterMetrics(got, metricNames)
@@ -153,13 +157,46 @@ func GatherAndCount(g prometheus.Gatherer, metricNames ...string) (int, error) {
 	return result, nil
 }
 
-// CollectAndCompare registers the provided Collector with a newly created
-// pedantic Registry. It then calls GatherAndCompare with that Registry and with
-// the provided metricNames.
+// ScrapeAndCompare calls a remote exporter's endpoint which is expected to return some metrics in
+// plain text format. Then it compares it with the results that the `expected` would return.
+// If the `metricNames` is not empty it would filter the comparison only to the given metric names.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and scraped metrics. See https://github.com/prometheus/client_golang/issues/1351.
+func ScrapeAndCompare(url string, expected io.Reader, metricNames ...string) error {
+	resp, err := http.Get(url)
+	if err != nil {
+		return fmt.Errorf("scraping metrics failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("the scraping target returned a status code other than 200: %d",
+			resp.StatusCode)
+	}
+
+	scraped, err := convertReaderToMetricFamily(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	wanted, err := convertReaderToMetricFamily(expected)
+	if err != nil {
+		return err
+	}
+
+	return compareMetricFamilies(scraped, wanted, metricNames...)
+}
+
+// CollectAndCompare collects the metrics identified by `metricNames` and compares them in the Prometheus text
+// exposition format to the data read from expected.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and collected metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func CollectAndCompare(c prometheus.Collector, expected io.Reader, metricNames ...string) error {
 	reg := prometheus.NewPedanticRegistry()
 	if err := reg.Register(c); err != nil {
-		return fmt.Errorf("registering collector failed: %s", err)
+		return fmt.Errorf("registering collector failed: %w", err)
 	}
 	return GatherAndCompare(reg, expected, metricNames...)
 }
@@ -168,6 +205,9 @@ func CollectAndCompare(c prometheus.Collector, expected io.Reader, metricNames .
 // it to an expected output read from the provided Reader in the Prometheus text
 // exposition format. If any metricNames are provided, only metrics with those
 // names are compared.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and gathered metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func GatherAndCompare(g prometheus.Gatherer, expected io.Reader, metricNames ...string) error {
 	return TransactionalGatherAndCompare(prometheus.ToTransactionalGatherer(g), expected, metricNames...)
 }
@@ -176,23 +216,84 @@ func GatherAndCompare(g prometheus.Gatherer, expected io.Reader, metricNames ...
 // it to an expected output read from the provided Reader in the Prometheus text
 // exposition format. If any metricNames are provided, only metrics with those
 // names are compared.
+//
+// NOTE: Be mindful of accidental discrepancies between expected and metricNames; metricNames filter
+// both expected and gathered metrics. See https://github.com/prometheus/client_golang/issues/1351.
 func TransactionalGatherAndCompare(g prometheus.TransactionalGatherer, expected io.Reader, metricNames ...string) error {
 	got, done, err := g.Gather()
 	defer done()
 	if err != nil {
-		return fmt.Errorf("gathering metrics failed: %s", err)
+		return fmt.Errorf("gathering metrics failed: %w", err)
 	}
+
+	wanted, err := convertReaderToMetricFamily(expected)
+	if err != nil {
+		return err
+	}
+
+	return compareMetricFamilies(got, wanted, metricNames...)
+}
+
+// CollectAndFormat collects the metrics identified by `metricNames` and returns them in the given format.
+func CollectAndFormat(c prometheus.Collector, format expfmt.FormatType, metricNames ...string) ([]byte, error) {
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(c); err != nil {
+		return nil, fmt.Errorf("registering collector failed: %w", err)
+	}
+
+	gotFiltered, err := reg.Gather()
+	if err != nil {
+		return nil, fmt.Errorf("gathering metrics failed: %w", err)
+	}
+
+	gotFiltered = filterMetrics(gotFiltered, metricNames)
+
+	var gotFormatted bytes.Buffer
+	enc := expfmt.NewEncoder(&gotFormatted, expfmt.NewFormat(format))
+	for _, mf := range gotFiltered {
+		if err := enc.Encode(mf); err != nil {
+			return nil, fmt.Errorf("encoding gathered metrics failed: %w", err)
+		}
+	}
+
+	return gotFormatted.Bytes(), nil
+}
+
+// convertReaderToMetricFamily would read from a io.Reader object and convert it to a slice of
+// dto.MetricFamily.
+func convertReaderToMetricFamily(reader io.Reader) ([]*dto.MetricFamily, error) {
+	var tp expfmt.TextParser
+	notNormalized, err := tp.TextToMetricFamilies(reader)
+	if err != nil {
+		return nil, fmt.Errorf("converting reader to metric families failed: %w", err)
+	}
+
+	// The text protocol handles empty help fields inconsistently. When
+	// encoding, any non-nil value, include the empty string, produces a
+	// "# HELP" line. But when decoding, the help field is only set to a
+	// non-nil value if the "# HELP" line contains a non-empty value.
+	//
+	// Because metrics in a registry always have non-nil help fields, populate
+	// any nil help fields in the parsed metrics with the empty string so that
+	// when we compare text encodings, the results are consistent.
+	for _, metric := range notNormalized {
+		if metric.Help == nil {
+			metric.Help = proto.String("")
+		}
+	}
+
+	return internal.NormalizeMetricFamilies(notNormalized), nil
+}
+
+// compareMetricFamilies would compare 2 slices of metric families, and optionally filters both of
+// them to the `metricNames` provided.
+func compareMetricFamilies(got, expected []*dto.MetricFamily, metricNames ...string) error {
 	if metricNames != nil {
 		got = filterMetrics(got, metricNames)
+		expected = filterMetrics(expected, metricNames)
 	}
-	var tp expfmt.TextParser
-	wantRaw, err := tp.TextToMetricFamilies(expected)
-	if err != nil {
-		return fmt.Errorf("parsing expected metrics failed: %s", err)
-	}
-	want := internal.NormalizeMetricFamilies(wantRaw)
 
-	return compare(got, want)
+	return compare(got, expected)
 }
 
 // compare encodes both provided slices of metric families into the text format,
@@ -201,83 +302,22 @@ func TransactionalGatherAndCompare(g prometheus.TransactionalGatherer, expected 
 // result.
 func compare(got, want []*dto.MetricFamily) error {
 	var gotBuf, wantBuf bytes.Buffer
-	enc := expfmt.NewEncoder(&gotBuf, expfmt.FmtText)
+	enc := expfmt.NewEncoder(&gotBuf, expfmt.NewFormat(expfmt.TypeTextPlain).WithEscapingScheme(model.NoEscaping))
 	for _, mf := range got {
 		if err := enc.Encode(mf); err != nil {
-			return fmt.Errorf("encoding gathered metrics failed: %s", err)
+			return fmt.Errorf("encoding gathered metrics failed: %w", err)
 		}
 	}
-	enc = expfmt.NewEncoder(&wantBuf, expfmt.FmtText)
+	enc = expfmt.NewEncoder(&wantBuf, expfmt.NewFormat(expfmt.TypeTextPlain).WithEscapingScheme(model.NoEscaping))
 	for _, mf := range want {
 		if err := enc.Encode(mf); err != nil {
-			return fmt.Errorf("encoding expected metrics failed: %s", err)
+			return fmt.Errorf("encoding expected metrics failed: %w", err)
 		}
 	}
-	if diffErr := diff(wantBuf, gotBuf); diffErr != "" {
-		return fmt.Errorf(diffErr)
+	if diffErr := diff.Diff(gotBuf.String(), wantBuf.String()); diffErr != "" {
+		return errors.New(diffErr)
 	}
 	return nil
-}
-
-// diff returns a diff of both values as long as both are of the same type and
-// are a struct, map, slice, array or string. Otherwise it returns an empty string.
-func diff(expected interface{}, actual interface{}) string {
-	if expected == nil || actual == nil {
-		return ""
-	}
-
-	et, ek := typeAndKind(expected)
-	at, _ := typeAndKind(actual)
-	if et != at {
-		return ""
-	}
-
-	if ek != reflect.Struct && ek != reflect.Map && ek != reflect.Slice && ek != reflect.Array && ek != reflect.String {
-		return ""
-	}
-
-	var e, a string
-	c := spew.ConfigState{
-		Indent:                  " ",
-		DisablePointerAddresses: true,
-		DisableCapacities:       true,
-		SortKeys:                true,
-	}
-	if et != reflect.TypeOf("") {
-		e = c.Sdump(expected)
-		a = c.Sdump(actual)
-	} else {
-		e = reflect.ValueOf(expected).String()
-		a = reflect.ValueOf(actual).String()
-	}
-
-	diff, _ := internal.GetUnifiedDiffString(internal.UnifiedDiff{
-		A:        internal.SplitLines(e),
-		B:        internal.SplitLines(a),
-		FromFile: "metric output does not match expectation; want",
-		FromDate: "",
-		ToFile:   "got:",
-		ToDate:   "",
-		Context:  1,
-	})
-
-	if diff == "" {
-		return ""
-	}
-
-	return "\n\nDiff:\n" + diff
-}
-
-// typeAndKind returns the type and kind of the given interface{}
-func typeAndKind(v interface{}) (reflect.Type, reflect.Kind) {
-	t := reflect.TypeOf(v)
-	k := t.Kind()
-
-	if k == reflect.Ptr {
-		t = t.Elem()
-		k = t.Kind()
-	}
-	return t, k
 }
 
 func filterMetrics(metrics []*dto.MetricFamily, names []string) []*dto.MetricFamily {

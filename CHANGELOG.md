@@ -1,8 +1,131 @@
 ## Unreleased
 
-* [CHANGE] Minimum required Go version is now 1.16.
-* [CHANGE] Added `collectors.WithGoCollections` that allows to choose what collection of Go runtime metrics user wants: Equivalent of [`MemStats` structure](https://pkg.go.dev/runtime#MemStats) configured using `GoRuntimeMemStatsCollection`, new based on dedicated [runtime/metrics](https://pkg.go.dev/runtime/metrics) metrics represented by `GoRuntimeMetricsCollection` option, or both by specifying `GoRuntimeMemStatsCollection | GoRuntimeMetricsCollection` flag.
-* [CHANGE] :warning: Change in `collectors.NewGoCollector` metrics: Reverting addition of new ~80 runtime metrics by default. You can enable this back with `GoRuntimeMetricsCollection` option or `GoRuntimeMemStatsCollection | GoRuntimeMetricsCollection`  for smooth transition.
+## 1.20.5 / 2024-10-15
+
+* [BUGFIX] testutil: Reverted #1424; functions using compareMetricFamilies are (again) only failing if filtered metricNames are in the expected input.
+
+## 1.20.4 / 2024-09-07
+
+* [BUGFIX] histograms: Fix possible data race when appending exemplars vs metrics gather. #1623
+
+## 1.20.3 / 2024-09-05
+
+* [BUGFIX] histograms: Fix possible data race when appending exemplars. #1608
+
+## 1.20.2 / 2024-08-23
+
+* [BUGFIX] promhttp: Unset Content-Encoding header when data is uncompressed. #1596
+
+## 1.20.1 / 2024-08-20
+
+* [BUGFIX] process-collector: Fixed unregistered descriptor error when using process collector with `PedanticRegistry` on linux machines. #1587
+
+## 1.20.0 / 2024-08-14
+
+* [CHANGE] :warning: go-collector: Remove `go_memstat_lookups_total` metric which was always 0; Go runtime stopped sharing pointer lookup statistics. #1577
+* [FEATURE] :warning: go-collector: Add 3 default metrics: `go_gc_gogc_percent`, `go_gc_gomemlimit_bytes` and `go_sched_gomaxprocs_threads` as those are recommended by the Go team. #1559
+* [FEATURE] go-collector: Add more information to all metrics' HELP e.g. the exact `runtime/metrics` sourcing each metric (if relevant). #1568 #1578
+* [FEATURE] testutil: Add CollectAndFormat method. #1503
+* [FEATURE] histograms: Add support for exemplars in native histograms. #1471
+* [FEATURE] promhttp: Add experimental support for `zstd` on scrape, controlled by the request `Accept-Encoding` header. #1496
+* [FEATURE] api/v1: Add `WithLimit` parameter to all API methods that supports it. #1544
+* [FEATURE] prometheus: Add support for created timestamps in constant histograms and constant summaries. #1537
+* [FEATURE] process-collector: Add network usage metrics: `process_network_receive_bytes_total` and `process_network_transmit_bytes_total`. #1555
+* [FEATURE] promlint: Add duplicated metric lint rule. #1472
+* [BUGFIX] promlint: Relax metric type in name linter rule. #1455
+* [BUGFIX] promhttp: Make sure server instrumentation wrapping supports new and future extra responseWriter methods. #1480
+* [BUGFIX] **breaking** testutil: Functions using compareMetricFamilies are now failing if filtered metricNames are not in the input. #1424 (reverted in 1.20.5)
+
+## 1.19.0 / 2024-02-27
+
+The module `prometheus/common v0.48.0` introduced an incompatibility when used together with client_golang (See https://github.com/prometheus/client_golang/pull/1448 for more details). If your project uses client_golang and you want to use `prometheus/common v0.48.0` or higher, please update client_golang to v1.19.0.
+
+* [CHANGE] Minimum required go version is now 1.20 (we also test client_golang against new 1.22 version). #1445 #1449
+* [FEATURE] collectors: Add version collector. #1422 #1427
+
+## 1.18.0 / 2023-12-22
+
+* [FEATURE] promlint: Allow creation of custom metric validations. #1311
+* [FEATURE] Go programs using client_golang can be built in wasip1 OS. #1350
+* [BUGFIX] histograms: Add timer to reset ASAP after bucket limiting has happened. #1367
+* [BUGFIX] testutil: Fix comparison of metrics with empty Help strings. #1378
+* [ENHANCEMENT] Improved performance of `MetricVec.WithLabelValues(...)`. #1360
+
+## 1.17.0 / 2023-09-27
+
+* [CHANGE] Minimum required go version is now 1.19 (we also test client_golang against new 1.21 version). #1325
+* [FEATURE] Add support for Created Timestamps in Counters, Summaries and Historams. #1313
+* [ENHANCEMENT] Enable detection of a native histogram without observations. #1314
+
+## 1.16.0 / 2023-06-15
+
+* [BUGFIX] api: Switch to POST for LabelNames, Series, and QueryExemplars. #1252
+* [BUGFIX] api: Fix undefined execution order in return statements. #1260
+* [BUGFIX] native histograms: Fix bug in bucket key calculation. #1279
+* [ENHANCEMENT] Reduce constrainLabels allocations for all metrics. #1272
+* [ENHANCEMENT] promhttp: Add process start time header for scrape efficiency. #1278
+* [ENHANCEMENT] promlint: Improve metricUnits runtime. #1286
+
+## 1.15.1 / 2023-05-3
+
+* [BUGFIX] Fixed promhttp.Instrument* handlers wrongly trying to attach exemplar to unsupported metrics (e.g. summary), \
+causing panics. #1253
+
+## 1.15.0 / 2023-04-13
+
+* [BUGFIX] Fix issue with atomic variables on ppc64le. #1171
+* [BUGFIX] Support for multiple samples within same metric. #1181
+* [BUGFIX] Bump golang.org/x/text to v0.3.8 to mitigate CVE-2022-32149. #1187
+* [ENHANCEMENT] Add exemplars and middleware examples. #1173
+* [ENHANCEMENT] Add more context to "duplicate label names" error to enable debugging. #1177
+* [ENHANCEMENT] Add constrained labels and constrained variant for all MetricVecs. #1151
+* [ENHANCEMENT] Moved away from deprecated github.com/golang/protobuf package. #1183
+* [ENHANCEMENT] Add possibility to dynamically get label values for http instrumentation. #1066
+* [ENHANCEMENT] Add ability to Pusher to add custom headers. #1218
+* [ENHANCEMENT] api: Extend and improve efficiency of json-iterator usage. #1225
+* [ENHANCEMENT] Added (official) support for go 1.20. #1234
+* [ENHANCEMENT] timer: Added support for exemplars. #1233
+* [ENHANCEMENT] Filter expected metrics as well in CollectAndCompare. #1143
+* [ENHANCEMENT] :warning: Only set start/end if time is not Zero. This breaks compatibility in experimental api package. If you strictly depend on empty time.Time as actual value, the behavior is now changed. #1238
+
+## 1.14.0 / 2022-11-08
+
+* [FEATURE] Add Support for Native Histograms. #1150
+* [CHANGE] Extend `prometheus.Registry` to implement `prometheus.Collector` interface. #1103
+
+## 1.13.1 / 2022-11-01
+
+* [BUGFIX] Fix race condition with Exemplar in Counter. #1146
+* [BUGFIX] Fix `CumulativeCount` value of `+Inf` bucket created from exemplar. #1148
+* [BUGFIX] Fix double-counting bug in `promhttp.InstrumentRoundTripperCounter`. #1118
+
+## 1.13.0 / 2022-08-05
+
+* [CHANGE] Minimum required Go version is now 1.17 (we also test client_golang against new 1.19 version).
+* [ENHANCEMENT] Added `prometheus.TransactionalGatherer` interface for `promhttp.Handler` use which allows using low allocation update techniques for custom collectors. #989
+* [ENHANCEMENT] Added exemplar support to `prometheus.NewConstHistogram`. See [`ExampleNewConstHistogram_WithExemplar`](prometheus/examples_test.go#L602) example on how to use it. #986
+* [ENHANCEMENT] `prometheus/push.Pusher` has now context aware methods that pass context to HTTP request. #1028
+* [ENHANCEMENT] `prometheus/push.Pusher` has now `Error` method that retrieve last error. #1075
+* [ENHANCEMENT] `testutil.GatherAndCompare` provides now readable diff on failed comparisons. #998
+* [ENHANCEMENT] Query API now supports timeouts. #1014
+* [ENHANCEMENT] New `MetricVec` method `DeletePartialMatch(labels Labels)` for deleting all metrics that match provided labels. #1013
+* [ENHANCEMENT] `api.Config` now accepts passing custom `*http.Client`. #1025
+* [BUGFIX] Raise exemplar labels limit from 64 to 128 bytes as specified in OpenMetrics spec. #1091
+* [BUGFIX] Allow adding exemplar to +Inf bucket to const histograms. #1094
+* [ENHANCEMENT] Most `promhttp.Instrument*` middlewares now supports adding exemplars to metrics. This allows hooking those to your tracing middleware that retrieves trace ID and put it in exemplar if present. #1055
+* [ENHANCEMENT] Added `testutil.ScrapeAndCompare` method. #1043
+* [BUGFIX] Fixed `GopherJS` build support. #897
+* [ENHANCEMENT] :warning: Added way to specify what `runtime/metrics`  `collectors.NewGoCollector` should use. See [`ExampleGoCollector_WithAdvancedGoMetrics`](prometheus/collectors/go_collector_latest_test.go#L263). #1102
+
+## 1.12.2 / 2022-05-13
+
+* [CHANGE] Added `collectors.WithGoCollections` that allows to choose what collection of Go runtime metrics user wants: Equivalent of [`MemStats` structure](https://pkg.go.dev/runtime#MemStats) configured using `GoRuntimeMemStatsCollection`, new based on dedicated [runtime/metrics](https://pkg.go.dev/runtime/metrics) metrics represented by `GoRuntimeMetricsCollection` option, or both by specifying `GoRuntimeMemStatsCollection | GoRuntimeMetricsCollection` flag. #1031
+* [CHANGE] :warning: Change in `collectors.NewGoCollector` metrics: Reverting addition of new ~80 runtime metrics by default. You can enable this back with `GoRuntimeMetricsCollection` option or `GoRuntimeMemStatsCollection | GoRuntimeMetricsCollection` for smooth transition.
+* [BUGFIX] Fixed the bug that causes generated histogram metric names to end with `_total`. ⚠️ This changes 3 metric names in the new Go collector that was reverted from default in this release.
+  * `go_gc_heap_allocs_by_size_bytes_total` -> `go_gc_heap_allocs_by_size_bytes`,
+  * `go_gc_heap_frees_by_size_bytes_total` -> `go_gc_heap_allocs_by_size_bytes`
+  * `go_gc_pauses_seconds_total` -> `go_gc_pauses_seconds`.
+* [CHANCE] Removed `-Inf` buckets from new Go Collector histograms.
 
 ## 1.12.1 / 2022-01-29
 
@@ -229,7 +352,7 @@ _This release removes all previously deprecated features, resulting in the break
 * [BUGFIX] Fixed goroutine leaks. #236 #472
 * [BUGFIX] Fixed an error message for exponential histogram buckets. #467
 * [BUGFIX] Fixed data race writing to the metric map. #401
-* [BUGFIX] API client: Decode JSON on a 4xx respons but do not on 204
+* [BUGFIX] API client: Decode JSON on a 4xx response but do not on 204
   responses. #476 #414
 
 ## 0.8.0 / 2016-08-17

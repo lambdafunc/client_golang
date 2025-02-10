@@ -14,6 +14,7 @@
 package promhttp
 
 import (
+	"context"
 	"io"
 	"log"
 	"net/http"
@@ -29,6 +30,7 @@ func TestLabelCheck(t *testing.T) {
 		varLabels     []string
 		constLabels   []string
 		curriedLabels []string
+		dynamicLabels []string
 		ok            bool
 	}{
 		"empty": {
@@ -59,12 +61,14 @@ func TestLabelCheck(t *testing.T) {
 			varLabels:     []string{"code", "method"},
 			constLabels:   []string{"foo", "bar"},
 			curriedLabels: []string{"dings", "bums"},
+			dynamicLabels: []string{"dyn", "amics"},
 			ok:            true,
 		},
 		"all labels used with an invalid const label name": {
 			varLabels:     []string{"code", "method"},
-			constLabels:   []string{"in-valid", "bar"},
+			constLabels:   []string{"in\x80valid", "bar"},
 			curriedLabels: []string{"dings", "bums"},
+			dynamicLabels: []string{"dyn", "amics"},
 			ok:            false,
 		},
 		"unsupported var label": {
@@ -97,6 +101,18 @@ func TestLabelCheck(t *testing.T) {
 			curriedLabels: []string{"method"},
 			ok:            true,
 		},
+		"supported label as const and dynamic": {
+			varLabels:     []string{},
+			constLabels:   []string{"code"},
+			dynamicLabels: []string{"method"},
+			ok:            true,
+		},
+		"supported label as curried and dynamic": {
+			varLabels:     []string{},
+			curriedLabels: []string{"code"},
+			dynamicLabels: []string{"method"},
+			ok:            true,
+		},
 		"supported label as const and curry with unsupported as var": {
 			varLabels:     []string{"foo"},
 			constLabels:   []string{"code"},
@@ -104,17 +120,18 @@ func TestLabelCheck(t *testing.T) {
 			ok:            false,
 		},
 		"invalid name and otherwise empty": {
-			metricName:    "in-valid",
+			metricName:    "in\x80valid",
 			varLabels:     []string{},
 			constLabels:   []string{},
 			curriedLabels: []string{},
 			ok:            false,
 		},
 		"invalid name with all the otherwise valid labels": {
-			metricName:    "in-valid",
+			metricName:    "in\x80valid",
 			varLabels:     []string{"code", "method"},
 			constLabels:   []string{"foo", "bar"},
 			curriedLabels: []string{"dings", "bums"},
+			dynamicLabels: []string{"dyn", "amics"},
 			ok:            false,
 		},
 	}
@@ -129,26 +146,38 @@ func TestLabelCheck(t *testing.T) {
 			for _, l := range sc.constLabels {
 				constLabels[l] = "dummy"
 			}
-			c := prometheus.NewCounterVec(
-				prometheus.CounterOpts{
-					Name:        metricName,
-					Help:        "c help",
-					ConstLabels: constLabels,
+			labelNames := append(append(sc.varLabels, sc.curriedLabels...), sc.dynamicLabels...)
+			c := prometheus.V2.NewCounterVec(
+				prometheus.CounterVecOpts{
+					CounterOpts: prometheus.CounterOpts{
+						Name:        metricName,
+						Help:        "c help",
+						ConstLabels: constLabels,
+					},
+					VariableLabels: prometheus.UnconstrainedLabels(labelNames),
 				},
-				append(sc.varLabels, sc.curriedLabels...),
 			)
-			o := prometheus.ObserverVec(prometheus.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Name:        metricName,
-					Help:        "c help",
-					ConstLabels: constLabels,
+			o := prometheus.ObserverVec(prometheus.V2.NewHistogramVec(
+				prometheus.HistogramVecOpts{
+					HistogramOpts: prometheus.HistogramOpts{
+						Name:        metricName,
+						Help:        "c help",
+						ConstLabels: constLabels,
+					},
+					VariableLabels: prometheus.UnconstrainedLabels(labelNames),
 				},
-				append(sc.varLabels, sc.curriedLabels...),
 			))
-			//nolint:typecheck // Ignore declared but unused error.
 			for _, l := range sc.curriedLabels {
 				c = c.MustCurryWith(prometheus.Labels{l: "dummy"})
 				o = o.MustCurryWith(prometheus.Labels{l: "dummy"})
+			}
+			opts := []Option{}
+			for _, l := range sc.dynamicLabels {
+				opts = append(opts, WithLabelFromCtx(l,
+					func(_ context.Context) string {
+						return "foo"
+					},
+				))
 			}
 
 			func() {
@@ -161,7 +190,7 @@ func TestLabelCheck(t *testing.T) {
 						t.Error("expected panic")
 					}
 				}()
-				InstrumentHandlerCounter(c, nil)
+				InstrumentHandlerCounter(c, nil, opts...)
 			}()
 			func() {
 				defer func() {
@@ -173,7 +202,7 @@ func TestLabelCheck(t *testing.T) {
 						t.Error("expected panic")
 					}
 				}()
-				InstrumentHandlerDuration(o, nil)
+				InstrumentHandlerDuration(o, nil, opts...)
 			}()
 			if sc.ok {
 				// Test if wantCode and wantMethod were detected correctly.
@@ -185,6 +214,11 @@ func TestLabelCheck(t *testing.T) {
 					if l == "method" {
 						wantMethod = true
 					}
+				}
+				// Curry the dynamic labels since this is done normally behind the scenes for the check
+				for _, l := range sc.dynamicLabels {
+					c = c.MustCurryWith(prometheus.Labels{l: "dummy"})
+					o = o.MustCurryWith(prometheus.Labels{l: "dummy"})
 				}
 				gotCode, gotMethod := checkLabels(c)
 				if gotCode != wantCode {
@@ -216,7 +250,7 @@ func TestLabels(t *testing.T) {
 	}{
 		"empty": {
 			varLabels:  []string{},
-			wantLabels: emptyLabels,
+			wantLabels: prometheus.Labels{},
 			reqMethod:  "GET",
 			respStatus: 200,
 			ok:         true,
@@ -279,7 +313,7 @@ func TestLabels(t *testing.T) {
 			ok:         false,
 		},
 	}
-	checkLabels := func(labels []string) (gotCode bool, gotMethod bool) {
+	checkLabels := func(labels []string) (gotCode, gotMethod bool) {
 		for _, label := range labels {
 			switch label {
 			case "code":
@@ -321,7 +355,7 @@ func TestLabels(t *testing.T) {
 	}
 }
 
-func TestMiddlewareAPI(t *testing.T) {
+func makeInstrumentedHandler(handler http.HandlerFunc, opts ...Option) (http.Handler, *prometheus.Registry) {
 	reg := prometheus.NewRegistry()
 
 	inFlightGauge := prometheus.NewGauge(prometheus.GaugeOpts{
@@ -366,25 +400,43 @@ func TestMiddlewareAPI(t *testing.T) {
 		[]string{},
 	)
 
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("OK"))
-	})
-
 	reg.MustRegister(inFlightGauge, counter, histVec, responseSize, writeHeaderVec)
 
-	chain := InstrumentHandlerInFlight(inFlightGauge,
+	return InstrumentHandlerInFlight(inFlightGauge,
 		InstrumentHandlerCounter(counter,
 			InstrumentHandlerDuration(histVec,
 				InstrumentHandlerTimeToWriteHeader(writeHeaderVec,
-					InstrumentHandlerResponseSize(responseSize, handler),
-				),
-			),
-		),
-	)
+					InstrumentHandlerResponseSize(responseSize, handler, opts...),
+					opts...),
+				opts...),
+			opts...),
+	), reg
+}
 
-	r, _ := http.NewRequest("GET", "www.example.com", nil)
+func TestMiddlewareAPI(t *testing.T) {
+	chain, reg := makeInstrumentedHandler(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("OK"))
+	})
+
+	r, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
 	w := httptest.NewRecorder()
 	chain.ServeHTTP(w, r)
+
+	assetMetricAndExemplars(t, reg, 5, nil)
+}
+
+func TestMiddlewareAPI_WithExemplars(t *testing.T) {
+	exemplar := prometheus.Labels{"traceID": "example situation observed by this metric"}
+
+	chain, reg := makeInstrumentedHandler(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("OK"))
+	}, WithExemplarFromContext(func(_ context.Context) prometheus.Labels { return exemplar }))
+
+	r, _ := http.NewRequest(http.MethodGet, "www.example.com", nil)
+	w := httptest.NewRecorder()
+	chain.ServeHTTP(w, r)
+
+	assetMetricAndExemplars(t, reg, 5, labelsToLabelPair(exemplar))
 }
 
 func TestInstrumentTimeToFirstWrite(t *testing.T) {

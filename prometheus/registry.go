@@ -15,24 +15,23 @@ package prometheus
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
 
-	"github.com/cespare/xxhash/v2"
-	//nolint:staticcheck // Ignore SA1019. Need to keep deprecated package for compatibility.
-	"github.com/golang/protobuf/proto"
-	"github.com/prometheus/common/expfmt"
-
-	dto "github.com/prometheus/client_model/go"
-
 	"github.com/prometheus/client_golang/prometheus/internal"
+
+	"github.com/cespare/xxhash/v2"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -252,9 +251,12 @@ func (errs MultiError) MaybeUnwrap() error {
 }
 
 // Registry registers Prometheus collectors, collects their metrics, and gathers
-// them into MetricFamilies for exposition. It implements both Registerer and
-// Gatherer. The zero value is not usable. Create instances with NewRegistry or
-// NewPedanticRegistry.
+// them into MetricFamilies for exposition. It implements Registerer, Gatherer,
+// and Collector. The zero value is not usable. Create instances with
+// NewRegistry or NewPedanticRegistry.
+//
+// Registry implements Collector to allow it to be used for creating groups of
+// metrics. See the Grouping example for how this can be done.
 type Registry struct {
 	mtx                   sync.RWMutex
 	collectorsByID        map[uint64]Collector // ID is a hash of the descIDs.
@@ -289,7 +291,7 @@ func (r *Registry) Register(c Collector) error {
 
 		// Is the descriptor valid at all?
 		if desc.err != nil {
-			return fmt.Errorf("descriptor %s is invalid: %s", desc, desc.err)
+			return fmt.Errorf("descriptor %s is invalid: %w", desc, desc.err)
 		}
 
 		// Is the descID unique?
@@ -312,16 +314,17 @@ func (r *Registry) Register(c Collector) error {
 			if dimHash != desc.dimHash {
 				return fmt.Errorf("a previously registered descriptor with the same fully-qualified name as %s has different label names or a different help string", desc)
 			}
-		} else {
-			// ...then check the new descriptors already seen.
-			if dimHash, exists := newDimHashesByName[desc.fqName]; exists {
-				if dimHash != desc.dimHash {
-					return fmt.Errorf("descriptors reported by collector have inconsistent label names or help strings for the same fully-qualified name, offender is %s", desc)
-				}
-			} else {
-				newDimHashesByName[desc.fqName] = desc.dimHash
-			}
+			continue
 		}
+
+		// ...then check the new descriptors already seen.
+		if dimHash, exists := newDimHashesByName[desc.fqName]; exists {
+			if dimHash != desc.dimHash {
+				return fmt.Errorf("descriptors reported by collector have inconsistent label names or help strings for the same fully-qualified name, offender is %s", desc)
+			}
+			continue
+		}
+		newDimHashesByName[desc.fqName] = desc.dimHash
 	}
 	// A Collector yielding no Desc at all is considered unchecked.
 	if len(newDescIDs) == 0 {
@@ -546,7 +549,7 @@ func (r *Registry) Gather() ([]*dto.MetricFamily, error) {
 			goroutineBudget--
 			runtime.Gosched()
 		}
-		// Once both checkedMetricChan and uncheckdMetricChan are closed
+		// Once both checkedMetricChan and uncheckedMetricChan are closed
 		// and drained, the contraption above will nil out cmc and umc,
 		// and then we can leave the collect loop here.
 		if cmc == nil && umc == nil {
@@ -556,6 +559,31 @@ func (r *Registry) Gather() ([]*dto.MetricFamily, error) {
 	return internal.NormalizeMetricFamilies(metricFamiliesByName), errs.MaybeUnwrap()
 }
 
+// Describe implements Collector.
+func (r *Registry) Describe(ch chan<- *Desc) {
+	r.mtx.RLock()
+	defer r.mtx.RUnlock()
+
+	// Only report the checked Collectors; unchecked collectors don't report any
+	// Desc.
+	for _, c := range r.collectorsByID {
+		c.Describe(ch)
+	}
+}
+
+// Collect implements Collector.
+func (r *Registry) Collect(ch chan<- Metric) {
+	r.mtx.RLock()
+	defer r.mtx.RUnlock()
+
+	for _, c := range r.collectorsByID {
+		c.Collect(ch)
+	}
+	for _, c := range r.uncheckedCollectors {
+		c.Collect(ch)
+	}
+}
+
 // WriteToTextfile calls Gather on the provided Gatherer, encodes the result in the
 // Prometheus text format, and writes it to a temporary file. Upon success, the
 // temporary file is renamed to the provided filename.
@@ -563,7 +591,7 @@ func (r *Registry) Gather() ([]*dto.MetricFamily, error) {
 // This is intended for use with the textfile collector of the node exporter.
 // Note that the node exporter expects the filename to be suffixed with ".prom".
 func WriteToTextfile(filename string, g Gatherer) error {
-	tmp, err := ioutil.TempFile(filepath.Dir(filename), filepath.Base(filename))
+	tmp, err := os.CreateTemp(filepath.Dir(filename), filepath.Base(filename))
 	if err != nil {
 		return err
 	}
@@ -582,7 +610,7 @@ func WriteToTextfile(filename string, g Gatherer) error {
 		return err
 	}
 
-	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), filename)
@@ -603,7 +631,7 @@ func processMetric(
 	}
 	dtoMetric := &dto.Metric{}
 	if err := metric.Write(dtoMetric); err != nil {
-		return fmt.Errorf("error collecting metric %v: %s", desc, err)
+		return fmt.Errorf("error collecting metric %v: %w", desc, err)
 	}
 	metricFamily, ok := metricFamiliesByName[desc.fqName]
 	if ok { // Existing name.
@@ -725,12 +753,13 @@ func (gs Gatherers) Gather() ([]*dto.MetricFamily, error) {
 	for i, g := range gs {
 		mfs, err := g.Gather()
 		if err != nil {
-			if multiErr, ok := err.(MultiError); ok {
+			multiErr := MultiError{}
+			if errors.As(err, &multiErr) {
 				for _, err := range multiErr {
-					errs = append(errs, fmt.Errorf("[from Gatherer #%d] %s", i+1, err))
+					errs = append(errs, fmt.Errorf("[from Gatherer #%d] %w", i+1, err))
 				}
 			} else {
-				errs = append(errs, fmt.Errorf("[from Gatherer #%d] %s", i+1, err))
+				errs = append(errs, fmt.Errorf("[from Gatherer #%d] %w", i+1, err))
 			}
 		}
 		for _, mf := range mfs {
@@ -904,6 +933,10 @@ func checkMetricConsistency(
 		h.WriteString(lp.GetValue())
 		h.Write(separatorByteSlice)
 	}
+	if dtoMetric.TimestampMs != nil {
+		h.WriteString(strconv.FormatInt(*(dtoMetric.TimestampMs), 10))
+		h.Write(separatorByteSlice)
+	}
 	hSum := h.Sum64()
 	if _, exists := metricHashes[hSum]; exists {
 		return fmt.Errorf(
@@ -931,7 +964,7 @@ func checkDescConsistency(
 	// Is the desc consistent with the content of the metric?
 	lpsFromDesc := make([]*dto.LabelPair, len(desc.constLabelPairs), len(dtoMetric.Label))
 	copy(lpsFromDesc, desc.constLabelPairs)
-	for _, l := range desc.variableLabels {
+	for _, l := range desc.variableLabels.names {
 		lpsFromDesc = append(lpsFromDesc, &dto.LabelPair{
 			Name: proto.String(l),
 		})

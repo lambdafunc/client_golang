@@ -14,7 +14,7 @@
 // It provides tools to compare sequences of strings and generate textual diffs.
 //
 // Maintaining `GetUnifiedDiffString` here because original repository
-// (https://github.com/pmezard/go-difflib) is no loger maintained.
+// (https://github.com/pmezard/go-difflib) is no longer maintained.
 package internal
 
 import (
@@ -22,17 +22,18 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
-func min(a, b int) int {
+func minInt(a, b int) int {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-func max(a, b int) int {
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
@@ -106,8 +107,8 @@ func NewMatcher(a, b []string) *SequenceMatcher {
 }
 
 func NewMatcherWithJunk(a, b []string, autoJunk bool,
-	isJunk func(string) bool) *SequenceMatcher {
-
+	isJunk func(string) bool,
+) *SequenceMatcher {
 	m := SequenceMatcher{IsJunk: isJunk, autoJunk: autoJunk}
 	m.SetSeqs(a, b)
 	return &m
@@ -163,12 +164,12 @@ func (m *SequenceMatcher) chainB() {
 	m.bJunk = map[string]struct{}{}
 	if m.IsJunk != nil {
 		junk := m.bJunk
-		for s, _ := range b2j {
+		for s := range b2j {
 			if m.IsJunk(s) {
 				junk[s] = struct{}{}
 			}
 		}
-		for s, _ := range junk {
+		for s := range junk {
 			delete(b2j, s)
 		}
 	}
@@ -183,7 +184,7 @@ func (m *SequenceMatcher) chainB() {
 				popular[s] = struct{}{}
 			}
 		}
-		for s, _ := range popular {
+		for s := range popular {
 			delete(b2j, s)
 		}
 	}
@@ -201,12 +202,15 @@ func (m *SequenceMatcher) isBJunk(s string) bool {
 // If IsJunk is not defined:
 //
 // Return (i,j,k) such that a[i:i+k] is equal to b[j:j+k], where
-//     alo <= i <= i+k <= ahi
-//     blo <= j <= j+k <= bhi
+//
+//	alo <= i <= i+k <= ahi
+//	blo <= j <= j+k <= bhi
+//
 // and for all (i',j',k') meeting those conditions,
-//     k >= k'
-//     i <= i'
-//     and if i == i', j <= j'
+//
+//	k >= k'
+//	i <= i'
+//	and if i == i', j <= j'
 //
 // In other words, of all maximal matching blocks, return one that
 // starts earliest in a, and of all those maximal matching blocks that
@@ -270,7 +274,7 @@ func (m *SequenceMatcher) findLongestMatch(alo, ahi, blo, bhi int) Match {
 	for besti+bestsize < ahi && bestj+bestsize < bhi &&
 		!m.isBJunk(m.b[bestj+bestsize]) &&
 		m.a[besti+bestsize] == m.b[bestj+bestsize] {
-		bestsize += 1
+		bestsize++
 	}
 
 	// Now that we have a wholly interesting match (albeit possibly
@@ -287,7 +291,7 @@ func (m *SequenceMatcher) findLongestMatch(alo, ahi, blo, bhi int) Match {
 	for besti+bestsize < ahi && bestj+bestsize < bhi &&
 		m.isBJunk(m.b[bestj+bestsize]) &&
 		m.a[besti+bestsize] == m.b[bestj+bestsize] {
-		bestsize += 1
+		bestsize++
 	}
 
 	return Match{A: besti, B: bestj, Size: bestsize}
@@ -424,12 +428,12 @@ func (m *SequenceMatcher) GetGroupedOpCodes(n int) [][]OpCode {
 	if codes[0].Tag == 'e' {
 		c := codes[0]
 		i1, i2, j1, j2 := c.I1, c.I2, c.J1, c.J2
-		codes[0] = OpCode{c.Tag, max(i1, i2-n), i2, max(j1, j2-n), j2}
+		codes[0] = OpCode{c.Tag, maxInt(i1, i2-n), i2, maxInt(j1, j2-n), j2}
 	}
 	if codes[len(codes)-1].Tag == 'e' {
 		c := codes[len(codes)-1]
 		i1, i2, j1, j2 := c.I1, c.I2, c.J1, c.J2
-		codes[len(codes)-1] = OpCode{c.Tag, i1, min(i2, i1+n), j1, min(j2, j1+n)}
+		codes[len(codes)-1] = OpCode{c.Tag, i1, minInt(i2, i1+n), j1, minInt(j2, j1+n)}
 	}
 	nn := n + n
 	groups := [][]OpCode{}
@@ -439,11 +443,13 @@ func (m *SequenceMatcher) GetGroupedOpCodes(n int) [][]OpCode {
 		// End the current group and start a new one whenever
 		// there is a large range with no changes.
 		if c.Tag == 'e' && i2-i1 > nn {
-			group = append(group, OpCode{c.Tag, i1, min(i2, i1+n),
-				j1, min(j2, j1+n)})
+			group = append(group, OpCode{
+				c.Tag, i1, minInt(i2, i1+n),
+				j1, minInt(j2, j1+n),
+			})
 			groups = append(groups, group)
 			group = []OpCode{}
-			i1, j1 = max(i1, i2-n), max(j1, j2-n)
+			i1, j1 = maxInt(i1, i2-n), maxInt(j1, j2-n)
 		}
 		group = append(group, OpCode{c.Tag, i1, i2, j1, j2})
 	}
@@ -483,7 +489,7 @@ func (m *SequenceMatcher) QuickRatio() float64 {
 	if m.fullBCount == nil {
 		m.fullBCount = map[string]int{}
 		for _, s := range m.b {
-			m.fullBCount[s] = m.fullBCount[s] + 1
+			m.fullBCount[s]++
 		}
 	}
 
@@ -498,7 +504,7 @@ func (m *SequenceMatcher) QuickRatio() float64 {
 		}
 		avail[s] = n - 1
 		if n > 0 {
-			matches += 1
+			matches++
 		}
 	}
 	return calculateRatio(matches, len(m.a)+len(m.b))
@@ -510,7 +516,7 @@ func (m *SequenceMatcher) QuickRatio() float64 {
 // is faster to compute than either .Ratio() or .QuickRatio().
 func (m *SequenceMatcher) RealQuickRatio() float64 {
 	la, lb := len(m.a), len(m.b)
-	return calculateRatio(min(la, lb), la+lb)
+	return calculateRatio(minInt(la, lb), la+lb)
 }
 
 // Convert range to the "ed" format
@@ -519,10 +525,10 @@ func formatRangeUnified(start, stop int) string {
 	beginning := start + 1 // lines start numbering with one
 	length := stop - start
 	if length == 1 {
-		return fmt.Sprintf("%d", beginning)
+		return strconv.Itoa(beginning)
 	}
 	if length == 0 {
-		beginning -= 1 // empty ranges begin at line just before the range
+		beginning-- // empty ranges begin at line just before the range
 	}
 	return fmt.Sprintf("%d,%d", beginning, length)
 }
@@ -637,7 +643,7 @@ func WriteUnifiedDiff(writer io.Writer, diff UnifiedDiff) error {
 func GetUnifiedDiffString(diff UnifiedDiff) (string, error) {
 	w := &bytes.Buffer{}
 	err := WriteUnifiedDiff(w, diff)
-	return string(w.Bytes()), err
+	return w.String(), err
 }
 
 // Split a string on "\n" while preserving them. The output can be used
